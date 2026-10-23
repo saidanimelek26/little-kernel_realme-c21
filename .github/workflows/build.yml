@@ -14,6 +14,12 @@ jobs:
     - name: Checkout sources
       uses: actions/checkout@v4
 
+    - name: Fix scripts permissions
+      run: |
+        # Ensure mkimage and all shell scripts are executable to prevent Error 126
+        chmod +x scripts/mkimage
+        find scripts/ -type f -name "*.sh" -exec chmod +x {} +
+
     - name: Install Python 2
       run: |
         sudo apt-get update
