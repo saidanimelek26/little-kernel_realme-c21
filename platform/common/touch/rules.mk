@@ -12,5 +12,7 @@ OBJS += \
 # SPI transport for the HX83102D (Realme C21).  Needs the generic MTK SPI
 # controller from platform/common/spi.
 ifeq ($(MTK_SPI_SUPPORT),yes)
-OBJS += $(LOCAL_DIR)/tpd_himax_spi.o
+OBJS += \
+	$(LOCAL_DIR)/tpd_himax_spi.o \
+	$(LOCAL_DIR)/hx83102d_fw.o
 endif

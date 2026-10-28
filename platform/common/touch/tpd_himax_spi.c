@@ -80,12 +80,22 @@
 
 #define HIMAX_REG_ICID		0x900000d0
 /*
- * Firmware handshake: after the (zero flash) firmware has been loaded and
- * started it reports 0xec 0x01 here, see himax_hx83102d_reload_to_active().
+ * Firmware handshake, see himax_hx83102d_reload_to_active(): write 0xec to
+ * 0x90000048, wait a moment and read the register back.  A running firmware
+ * answers 0x01ec, the boot ROM leaves something else (0x0000) there.
  */
-#define HIMAX_REG_FW_STATE	0x900000e4
+#define HIMAX_REG_FW_RELOAD	0x90000048
+#define HIMAX_FW_RELOAD_CMD	0xec
 #define HIMAX_FW_STATE0		0xec
 #define HIMAX_FW_STATE1		0x01
+
+/*
+ * State register of the boot ROM, see himax_mcu_sys_reset(): right after a
+ * reset it reads 0x00 0x02, which means "no firmware, waiting for one".
+ */
+#define HIMAX_REG_ROM_STATE	0x900000e4
+#define HIMAX_ROM_STATE0	0x00
+#define HIMAX_ROM_STATE1	0x02
 
 /* Firmware restart used by himax_sense_on_by_sys_rst(). */
 #define HIMAX_REG_SENSE_MAGIC	0x9000005c
@@ -114,8 +124,10 @@
  * aligned: no other data can share a line with them, and the rounded
  * length used by the DMA engine stays inside the buffer.
  */
-static u8 himax_spi_tx[64] __attribute__((aligned(64)));
-static u8 himax_spi_rx[64] __attribute__((aligned(64)));
+#define HIMAX_SPI_BUF_SIZE	128
+
+static u8 himax_spi_tx[HIMAX_SPI_BUF_SIZE] __attribute__((aligned(64)));
+static u8 himax_spi_rx[HIMAX_SPI_BUF_SIZE] __attribute__((aligned(64)));
 
 static int himax_spi_bus = -1;
 static int himax_spi_ready;
@@ -260,15 +272,38 @@ static int himax_flash_write_burst(u32 addr, u32 val)
 	return himax_bus_write(HIMAX_REG_AHB_ADDR, b, sizeof(b));
 }
 
-/* True when the Himax firmware is running and past its reload. */
+/*
+ * True when the Himax firmware is running and past its reload.
+ *
+ * himax_hx83102d_reload_to_active() pokes 0x90000048 with 0xec and reads the
+ * register back: a live firmware answers 0x01ec, the boot ROM does not.
+ * This has to be a write/read pair, a plain read of 0x900000e4 only reports
+ * the ROM state and says nothing about the firmware.
+ */
 static int himax_fw_alive(void)
 {
 	u8 d[4];
 
-	if (himax_ahb_read(HIMAX_REG_FW_STATE, d, sizeof(d)))
+	if (himax_flash_write_burst(HIMAX_REG_FW_RELOAD, HIMAX_FW_RELOAD_CMD))
+		return 0;
+
+	mdelay(1);
+
+	if (himax_ahb_read(HIMAX_REG_FW_RELOAD, d, sizeof(d)))
 		return 0;
 
 	return d[0] == HIMAX_FW_STATE0 && d[1] == HIMAX_FW_STATE1;
+}
+
+/* True when the boot ROM is waiting for a firmware image. */
+static int himax_rom_waiting(void)
+{
+	u8 d[4];
+
+	if (himax_ahb_read(HIMAX_REG_ROM_STATE, d, sizeof(d)))
+		return 0;
+
+	return d[0] == HIMAX_ROM_STATE0 && d[1] == HIMAX_ROM_STATE1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -293,6 +328,391 @@ static void himax_spi_reset_pulse(void)
 	mdelay(HIMAX_SPI_RST_LOW_MS);
 	mt_set_gpio_out(HIMAX_SPI_RST_GPIO, GPIO_OUT_ONE);
 	mdelay(HIMAX_SPI_RST_HIGH_MS);
+}
+
+/* ------------------------------------------------------------------ */
+/* Zero flash firmware download                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The HX83102D is a "zero flash" part: it has no serial flash of its own,
+ * the kernel pushes the firmware into its SRAM on every cold boot
+ * (hx83102d_nf_zf_part_info()).  LK runs before that, so on a cold boot the
+ * chip sits in its boot ROM and the event stack never fills: the touch
+ * controller is detected, but it can not report a single point.
+ *
+ * The image below is /vendor/firmware/tp/20701/FW_HX83102D_NF_90HZ_TRULY_FAE.img
+ * from the stock RMX3201 firmware, embedded at build time by
+ * platform/common/touch/hx83102d_fw.S.
+ *
+ * Layout, as parsed by hx_parse_bin_cfg_data():
+ *   0x00000 .. 0x0ffff   firmware code         (part 0: 40928 bytes)
+ *   0x10000              part table            (part count at +12)
+ *   0x10000 + 16 * i     part i                (sram, size, image offset)
+ *   ...
+ *
+ * Every section is written and then checked by the CRC engine, exactly like
+ * himax_sram_write_crc_check(): up to ten attempts.
+ */
+
+#define HX_ZF_PART_TABLE	0x10000
+#define HX_ZF_MAX_PARTS		16
+/*
+ * Payload per burst write.  The SPI FIFO is 32 bytes deep and a framed
+ * write costs two header bytes plus the four address bytes, so 24 bytes of
+ * payload is the largest whole number of words that still fits.  Going
+ * through the DMA engine would be faster, but its transfer length has to be
+ * a multiple of four and a 0xf2 framed write never is.
+ */
+#define HX_ZF_CHUNK		24
+#define HX_ZF_CFG_MAX		16384	/* config window is 9728 here */
+#define HX_ZF_TRIES		10
+
+/* CRC engine, himax_hw_check_CRC(). */
+#define HX_ZF_CRC_FROM		0x80050020
+#define HX_ZF_CRC_LEN		0x80050028
+#define HX_ZF_CRC_CTRL		0x80050000
+#define HX_ZF_CRC_VALUE		0x80050018
+#define HX_ZF_CRC_MAGIC		0x00990000
+#define HX_ZF_CRC_TRIES		100
+
+/* Overlay reply handshake, hx83102d_nf_zf_part_info(). */
+#define HX_ZF_OVL_REPLY_REG	0x10007ffc
+#define HX_ZF_OVL_BORDER	0x66
+
+/* Mode switch word cleared by himax_mcu_clean_sram_0f(). */
+#define HX_ZF_MODE_SWITCH	0x10007294
+
+/* Firmware blob, see hx83102d_fw.S. */
+extern const u8 hx83102d_fw_img[];
+extern const u8 hx83102d_fw_img_end[];
+
+struct himax_zf_part {
+	u32 sram;
+	u32 size;
+	u32 off;
+	int ovl;		/* overlay index, -1 when not an overlay */
+};
+
+/* Assembled config window, written through DMA: keep it on its own lines. */
+static u8 himax_zf_cfg[HX_ZF_CFG_MAX] __attribute__((aligned(64)));
+
+/*
+ * himax_mcu_sys_reset(): after this the boot ROM waits for an image and
+ * reports 0x00 0x02 in 0x900000e4.  The vendor retries the pulse a few
+ * times, so do the same; a running firmware simply never shows that state
+ * and the reset still happened.
+ */
+static int himax_zf_enter_rom(void)
+{
+	u8 v;
+	u8 d[4];
+	int i;
+
+	for (i = 0; i < 6; i++) {
+		v = 0x27;
+		if (himax_bus_write(0x31, &v, 1))
+			return -1;
+
+		v = 0x95;
+		if (himax_bus_write(0x32, &v, 1))
+			return -1;
+
+		v = 0x00;
+		if (himax_bus_write(0x31, &v, 1))
+			return -1;
+
+		mdelay(1);
+
+		if (himax_ahb_read(HIMAX_REG_ROM_STATE, d, sizeof(d)))
+			return -1;
+
+		if (d[0] == HIMAX_ROM_STATE0 && d[1] == HIMAX_ROM_STATE1)
+			break;
+	}
+
+	dprintf(CRITICAL, "tpd: spi%d rom state %02x %02x\n",
+		himax_spi_bus, d[0], d[1]);
+
+	return 0;
+}
+
+/*
+ * himax_mcu_write_sram_0f(): { LE32(address), payload } bursts, the address
+ * advancing by the chunk size.  The chunks stay inside the SPI FIFO so the
+ * chip sees one well formed command per transfer.
+ */
+static int himax_zf_write(u32 addr, const u8 *data, u32 len)
+{
+	u32 chunk;
+	u32 i;
+
+	if (himax_burst_enable(1))
+		return -1;
+
+	while (len) {
+		chunk = len > HX_ZF_CHUNK ? HX_ZF_CHUNK : len;
+
+		himax_spi_tx[0] = HIMAX_SPI_WRITE;
+		himax_spi_tx[1] = HIMAX_REG_AHB_ADDR;
+		for (i = 0; i < 4; i++)
+			himax_spi_tx[2 + i] = (u8)(addr >> (8 * i));
+		memcpy(himax_spi_tx + 6, data, chunk);
+
+		if (himax_spi_xfer(chunk + 6))
+			return -1;
+
+		addr += chunk;
+		data += chunk;
+		len -= chunk;
+		udelay(10);
+	}
+
+	return 0;
+}
+
+/*
+ * himax_hw_check_CRC(): let the chip CRC a SRAM window.
+ * 0x80050020 <- start, 0x80050028 <- 0x0099 | words, poll 0x80050000 bit 0,
+ * then read the result from 0x80050018.  0xffffffff means "no answer".
+ */
+static u32 himax_zf_crc_hw(u32 addr, u32 len)
+{
+	u8 d[4];
+	int i;
+
+	if (himax_flash_write_burst(HX_ZF_CRC_FROM, addr))
+		return 0xffffffffu;
+
+	if (himax_flash_write_burst(HX_ZF_CRC_LEN,
+				    HX_ZF_CRC_MAGIC | ((len / 4) & 0xffff)))
+		return 0xffffffffu;
+
+	for (i = 0; i < HX_ZF_CRC_TRIES; i++) {
+		if (himax_ahb_read(HX_ZF_CRC_CTRL, d, sizeof(d)))
+			return 0xffffffffu;
+
+		if (!(d[0] & 0x01)) {
+			if (himax_ahb_read(HX_ZF_CRC_VALUE, d, sizeof(d)))
+				return 0xffffffffu;
+
+			return ((u32)d[0]) | ((u32)d[1] << 8) |
+			       ((u32)d[2] << 16) | ((u32)d[3] << 24);
+		}
+
+		udelay(100);
+	}
+
+	return 0xffffffffu;
+}
+
+/* himax_mcu_Calculate_CRC_with_AP(): CRC-32C over little endian words. */
+static u32 himax_zf_crc_sw(const u8 *buf, u32 len)
+{
+	u32 crc = 0xffffffffu;
+	u32 i;
+	int b;
+
+	for (i = 0; i + 4 <= len; i += 4) {
+		crc ^= ((u32)buf[i]) | ((u32)buf[i + 1] << 8) |
+		       ((u32)buf[i + 2] << 16) | ((u32)buf[i + 3] << 24);
+
+		for (b = 0; b < 32; b++)
+			crc = (crc & 1) ? ((crc >> 1) ^ 0x82f63b78u)
+					: (crc >> 1);
+	}
+
+	return crc;
+}
+
+/* Write one section until the CRC engine accepts it. */
+static int himax_zf_load(u32 addr, const u8 *data, u32 len, u32 want)
+{
+	u32 crc = 0;
+	int i;
+
+	for (i = 0; i < HX_ZF_TRIES; i++) {
+		if (himax_zf_write(addr, data, len))
+			return -1;
+
+		crc = himax_zf_crc_hw(addr, len);
+		if (crc == want)
+			return 0;
+
+		dprintf(CRITICAL,
+			"tpd: spi%d crc 0x%08x != 0x%08x at 0x%08x (try %d)\n",
+			himax_spi_bus, crc, want, addr, i + 1);
+	}
+
+	return -1;
+}
+
+static int himax_zf_download(void)
+{
+	const u8 *img = hx83102d_fw_img;
+	u32 img_len = (u32)(hx83102d_fw_img_end - hx83102d_fw_img);
+	struct himax_zf_part part[HX_ZF_MAX_PARTS];
+	int ovl[3] = { -1, -1, -1 };
+	int nparts, i, imax = 0;
+	u32 cfg_base = 0xffffffffu;
+	u32 cfg_max = 0;
+	u32 cfg_size;
+	u32 crc;
+	u8 d[4];
+
+	if (img_len < HX_ZF_PART_TABLE + 16) {
+		dprintf(CRITICAL, "tpd: fw image missing\n");
+		return -1;
+	}
+
+	nparts = img[HX_ZF_PART_TABLE + 12];
+	if (nparts < 2 || nparts > HX_ZF_MAX_PARTS) {
+		dprintf(CRITICAL, "tpd: fw image part count %d\n", nparts);
+		return -1;
+	}
+
+	for (i = 0; i < nparts; i++) {
+		const u8 *e = img + HX_ZF_PART_TABLE + i * 16;
+
+		part[i].sram = (u32)e[0] | ((u32)e[1] << 8) |
+			       ((u32)e[2] << 16) | ((u32)e[3] << 24);
+		part[i].size = (u32)e[4] | ((u32)e[5] << 8);
+		part[i].off = (u32)e[8] | ((u32)e[9] << 8) |
+			      ((u32)e[10] << 16);
+		part[i].ovl = -1;
+
+		/* Overlay sections carry 0x55 0x66 and their index. */
+		if (e[15] == 0x55 && e[14] == 0x66) {
+			part[i].ovl = e[13];
+			if (e[13] < 3)
+				ovl[e[13]] = i;
+		}
+
+		if (part[i].off + part[i].size > img_len) {
+			dprintf(CRITICAL,
+				"tpd: fw part %d runs past the image\n", i);
+			return -1;
+		}
+	}
+
+	/* The config sections are written as one contiguous window. */
+	for (i = 1; i < nparts; i++) {
+		if (part[i].ovl >= 0)
+			continue;
+
+		if (part[i].sram < cfg_base)
+			cfg_base = part[i].sram;
+
+		if (part[i].sram > cfg_max) {
+			cfg_max = part[i].sram;
+			imax = i;
+		}
+	}
+
+	if (cfg_base == 0xffffffffu) {
+		dprintf(CRITICAL, "tpd: fw image has no config sections\n");
+		return -1;
+	}
+
+	cfg_size = (cfg_max - cfg_base) + part[imax].size;
+	cfg_size += cfg_size % 16;
+
+	if (cfg_size > sizeof(himax_zf_cfg)) {
+		dprintf(CRITICAL, "tpd: fw config window %d too big\n",
+			cfg_size);
+		return -1;
+	}
+
+	memset(himax_zf_cfg, 0, cfg_size);
+
+	for (i = 1; i < nparts; i++) {
+		u32 at;
+
+		if (part[i].ovl >= 0)
+			continue;
+
+		at = part[i].sram;
+		if (at % 4)
+			at -= at % 4;
+
+		if (at < cfg_base || at - cfg_base + part[i].size > cfg_size) {
+			dprintf(CRITICAL, "tpd: fw part %d outside window\n", i);
+			return -1;
+		}
+
+		memcpy(himax_zf_cfg + (at - cfg_base),
+		       img + part[i].off, part[i].size);
+	}
+
+	dprintf(CRITICAL,
+		"tpd: spi%d fw image %d parts, code %d@0x%08x, config %d@0x%08x, overlay %d\n",
+		himax_spi_bus, nparts,
+		part[0].size, part[0].sram,
+		cfg_size, cfg_base,
+		ovl[2] >= 0 ? (int)part[ovl[2]].size : 0);
+
+	if (himax_zf_enter_rom())
+		return -1;
+
+	/* Part 0: the firmware itself, its region CRC has to be zero. */
+	if (himax_zf_load(part[0].sram, img + part[0].off, part[0].size, 0)) {
+		dprintf(CRITICAL, "tpd: spi%d firmware section failed\n",
+			himax_spi_bus);
+		return -1;
+	}
+
+	/* Config window, checked against the software CRC of the image. */
+	crc = himax_zf_crc_sw(himax_zf_cfg, cfg_size);
+	if (himax_zf_load(cfg_base, himax_zf_cfg, cfg_size, crc)) {
+		dprintf(CRITICAL, "tpd: spi%d config section failed\n",
+			himax_spi_bus);
+		return -1;
+	}
+
+	/* Border overlay, then the reply handshake it expects. */
+	if (ovl[2] >= 0 && part[ovl[2]].size) {
+		int o = ovl[2];
+
+		if (himax_zf_load(part[o].sram, img + part[o].off,
+				  part[o].size, 0)) {
+			dprintf(CRITICAL, "tpd: spi%d overlay failed\n",
+				himax_spi_bus);
+			return -1;
+		}
+
+		if (himax_burst_enable(1))
+			return -1;
+
+		if (himax_flash_write_burst(HX_ZF_OVL_REPLY_REG,
+					    HX_ZF_OVL_BORDER))
+			return -1;
+
+		for (o = 0; o < HX_ZF_TRIES; o++) {
+			if (himax_ahb_read(HX_ZF_OVL_REPLY_REG, d,
+					   sizeof(d)))
+				return -1;
+
+			if (d[0] == HX_ZF_OVL_BORDER)
+				break;
+
+			mdelay(1);
+		}
+
+		if (o == HX_ZF_TRIES) {
+			dprintf(CRITICAL, "tpd: spi%d overlay reply %02x\n",
+				himax_spi_bus, d[0]);
+			return -1;
+		}
+	}
+
+	/* himax_mcu_clean_sram_0f(zf_data_mode_switch, 4, 0). */
+	memset(d, 0, sizeof(d));
+	if (himax_zf_write(HX_ZF_MODE_SWITCH, d, sizeof(d)))
+		return -1;
+
+	dprintf(CRITICAL, "tpd: spi%d fw downloaded\n", himax_spi_bus);
+
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -372,7 +792,6 @@ static int himax_spi_reg_echo(void)
  */
 static int himax_spi_detect(u32 *id, u8 raw[4], const char *stage)
 {
-	u8 st[4];
 	int ret;
 
 	ret = himax_spi_read_id(id, raw);
@@ -403,8 +822,7 @@ static int himax_spi_detect(u32 *id, u8 raw[4], const char *stage)
 		return -1;
 
 	/* Firmware already running: it answers the reload handshake. */
-	if (himax_ahb_read(HIMAX_REG_FW_STATE, st, sizeof(st)) == 0 &&
-	    st[0] == HIMAX_FW_STATE0 && st[1] == HIMAX_FW_STATE1) {
+	if (himax_fw_alive()) {
 		dprintf(CRITICAL, "tpd: spi%d %s fw alive\n",
 			himax_spi_bus, stage);
 		return 0;
@@ -417,22 +835,11 @@ static int himax_spi_detect(u32 *id, u8 raw[4], const char *stage)
 }
 
 /*
- * Restart the firmware so that it starts scanning, following
- * himax_sense_on_by_sys_rst() / himax_hx83102d_reload_to_active():
- *
- *   0x9000005c <- 0
- *   0x90000018 <- 0x55      (system reset)
- *   poll 0x900000e4 until 0xec 0x01
+ * Poll the reload handshake until the firmware answers.
  */
-static int himax_spi_sense_on(void)
+static int himax_spi_wait_alive(void)
 {
 	int i;
-
-	if (himax_flash_write_burst(HIMAX_REG_SENSE_MAGIC, 0))
-		return -1;
-
-	if (himax_flash_write_burst(HIMAX_REG_SYS_RESET, HIMAX_SYS_RESET_VAL))
-		return -1;
 
 	for (i = 0; i < HIMAX_SPI_SENSE_TRIES; i++) {
 		if (himax_fw_alive())
@@ -441,6 +848,38 @@ static int himax_spi_sense_on(void)
 	}
 
 	return -1;
+}
+
+/*
+ * Restart the firmware so that it starts scanning, following
+ * himax_sense_on_by_sys_rst() / himax_hx83102d_reload_to_active():
+ *
+ *   0x9000005c <- 0
+ *   0x90000018 <- 0x55      (system reset)
+ *   write 0x90000048 <- 0xec and read it back until it answers 0x01ec
+ *
+ * If the system reset leaves it silent, retry the way himax_sense_on(0)
+ * does, through the 0x31/0x32 ROM reset.
+ */
+static int himax_spi_sense_on(void)
+{
+	/* himax_interface_on(): burst mode on, address auto increment off. */
+	if (himax_burst_enable(0))
+		return -1;
+
+	if (himax_flash_write_burst(HIMAX_REG_SENSE_MAGIC, 0))
+		return -1;
+
+	if (himax_flash_write_burst(HIMAX_REG_SYS_RESET, HIMAX_SYS_RESET_VAL))
+		return -1;
+
+	if (himax_spi_wait_alive() == 0)
+		return 0;
+
+	if (himax_zf_enter_rom())
+		return -1;
+
+	return himax_spi_wait_alive();
 }
 
 int himax_spi_tpd_probe(u32 *product_id)
@@ -526,19 +965,34 @@ int himax_spi_tpd_probe(u32 *product_id)
 	/*
 	 * The event stack is only filled while the firmware runs in active
 	 * mode, so enter that mode the same way the kernel does
-	 * (himax_sense_on(0): 0x9000005c <- 0, 0x90000018 <- 0x55, then
-	 * wait until 0x900000e4 reads 0xec 0x01).
+	 * (himax_sense_on_by_sys_rst(): 0x9000005c <- 0, 0x90000018 <- 0x55,
+	 * then the 0x90000048 reload handshake has to answer 0x01ec).
 	 *
-	 * This is a zero-flash part: the firmware is downloaded into SRAM by
-	 * the kernel on every cold boot.  When it is not there nothing can
-	 * report a point, and it is better to say so than to pretend the
-	 * touch controller is usable.
+	 * This is a zero-flash part: the firmware lives in SRAM only and the
+	 * kernel reloads it on every cold boot, after LK has run.  The ROM
+	 * reports 0x00 0x02 in 0x900000e4 while it waits for an image; that
+	 * is the cold boot case, and the embedded image is pushed into SRAM
+	 * right away instead of waiting for a firmware that is not there.
 	 */
-	if (himax_spi_sense_on()) {
+	if (himax_rom_waiting() || himax_spi_sense_on()) {
 		dprintf(CRITICAL,
-			"tpd: spi%d fw not running (zero-flash part without kernel firmware)\n",
+			"tpd: spi%d fw not running, downloading image\n",
 			himax_spi_bus);
-		return -1;
+
+		if (himax_zf_download()) {
+			dprintf(CRITICAL,
+				"tpd: spi%d firmware download failed\n",
+				himax_spi_bus);
+			return -1;
+		}
+
+		/* Boot what was just written and wait for the handshake. */
+		if (himax_spi_sense_on()) {
+			dprintf(CRITICAL,
+				"tpd: spi%d fw still not running after download\n",
+				himax_spi_bus);
+			return -1;
+		}
 	}
 
 	dprintf(CRITICAL, "tpd: spi%d fw active\n", himax_spi_bus);
