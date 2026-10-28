@@ -2038,6 +2038,18 @@ void mt_boot_init(const struct app_descriptor *app)
 	/* Will not return */
 	boot_linux_from_storage();
 
+	/*
+	 * C21 / RMX3201: only enter fastboot when it was explicitly selected.
+	 * If the kernel could not be started, reboot so the boot menu comes
+	 * back instead of silently dropping the user into fastboot again.
+	 */
+	if (g_boot_mode != FASTBOOT) {
+		dprintf(CRITICAL, "[BOOT] kernel start failed (mode %d), rebooting\n",
+			g_boot_mode);
+		mdelay(1000);
+		mtk_arch_reset(1);
+	}
+
 fastboot:
 	target_fastboot_init();
 	if (!usb_init)
