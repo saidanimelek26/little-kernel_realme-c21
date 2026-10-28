@@ -1119,6 +1119,187 @@ void video_clear_image_by_color(const unsigned int data,
 	video_clear_image(cfb_fb_addrs, xpos, ypos, width, height, data);
 }
 
+/* ======================================================================
+ * NovaLK graphics primitives
+ *
+ * Absolute-pixel drawing used by the NovaLK boot menu.  These functions
+ * intentionally do not flush the panel (no mt_disp_update per call) so
+ * a whole frame can be composed and then pushed once with video_refresh().
+ *
+ * They assume MTK_LCM_PHYSICAL_ROTATION == "0" (the Realme C21 panel:
+ * hx83102d_hdp_dsi_vdo_truly_truly_zal3251, project/rmx2180.mk).
+ * ====================================================================== */
+
+int video_screen_width(void)
+{
+	return pGD ? (int)SIZE_X : 0;
+}
+
+int video_screen_height(void)
+{
+	return pGD ? (int)SIZE_Y : 0;
+}
+
+void video_refresh(void)
+{
+	if (pGD)
+		mt_disp_update(0, 0, CFG_DISPLAY_WIDTH, CFG_DISPLAY_HEIGHT);
+}
+
+static unsigned int novalk_pack_color(unsigned int rgb)
+{
+	unsigned int r = (rgb >> 16) & 0xff;
+	unsigned int g = (rgb >> 8) & 0xff;
+	unsigned int b = rgb & 0xff;
+
+	switch (DATA_FMT) {
+	case CFB_555RGB_15BIT:
+		return ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+	case CFB_565RGB_16BIT:
+		return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+	case CFB_332RGB_8BIT:
+		return (r & 0xe0) | ((g >> 3) & 0x1c) | (b >> 6);
+	case CFB_FMT_8BIT:
+		return r;
+	default:
+		return rgb & 0xffffff;
+	}
+}
+
+static inline void novalk_write_pixel(int x, int y, unsigned int color)
+{
+	unsigned char *p = (unsigned char *)cfb_fb_addrs +
+			   (unsigned int)y * LINE_LEN + (unsigned int)x * PIXEL_SIZE;
+
+	switch (PIXEL_SIZE) {
+	case 4:
+		*(unsigned int *)p = color | 0xFF000000;
+		break;
+	case 3:
+		p[0] = color & 0xff;
+		p[1] = (color >> 8) & 0xff;
+		p[2] = (color >> 16) & 0xff;
+		break;
+	case 2:
+		*(unsigned short *)p = (unsigned short)color;
+		break;
+	default:
+		break;
+	}
+}
+
+void video_fill_rect(unsigned int color, int x, int y, int width, int height)
+{
+	int screen_w, screen_h, row;
+
+	if (!pGD || !cfb_fb_addrs || width <= 0 || height <= 0)
+		return;
+
+	screen_w = (int)SIZE_X;
+	screen_h = (int)SIZE_Y;
+
+	if (x < 0) {
+		width += x;
+		x = 0;
+	}
+	if (y < 0) {
+		height += y;
+		y = 0;
+	}
+	if (x >= screen_w || y >= screen_h)
+		return;
+	if (x + width > screen_w)
+		width = screen_w - x;
+	if (y + height > screen_h)
+		height = screen_h - y;
+	if (width <= 0 || height <= 0)
+		return;
+
+	color = novalk_pack_color(color);
+
+	for (row = 0; row < height; row++) {
+		unsigned char *line = (unsigned char *)cfb_fb_addrs +
+				      (unsigned int)(y + row) * LINE_LEN;
+		int col;
+
+		if (PIXEL_SIZE == 4) {
+			unsigned int *p = (unsigned int *)line + x;
+			for (col = 0; col < width; col++)
+				p[col] = color | 0xFF000000;
+		} else if (PIXEL_SIZE == 3) {
+			unsigned char *p = line + x * 3;
+			for (col = 0; col < width; col++) {
+				p[0] = color & 0xff;
+				p[1] = (color >> 8) & 0xff;
+				p[2] = (color >> 16) & 0xff;
+				p += 3;
+			}
+		} else if (PIXEL_SIZE == 2) {
+			unsigned short *p = (unsigned short *)line + x;
+			for (col = 0; col < width; col++)
+				p[col] = (unsigned short)color;
+		}
+	}
+}
+
+static void novalk_draw_glyph(int x, int y, int scale, unsigned int fg,
+			      unsigned int bg, unsigned char ch)
+{
+	const unsigned char *glyph = mtk_vdo_fntdata + (unsigned int)ch * MTK_VFH;
+	int screen_w = (int)SIZE_X;
+	int screen_h = (int)SIZE_Y;
+	int row, col, dy, dx;
+
+	for (row = 0; row < MTK_VFH; row++) {
+		unsigned char bits = glyph[row];
+
+		for (col = 0; col < MTK_VFW; col++) {
+			unsigned int color = (bits & (0x80 >> col)) ? fg : bg;
+
+			for (dy = 0; dy < scale; dy++) {
+				int py = y + row * scale + dy;
+
+				if (py < 0 || py >= screen_h)
+					continue;
+
+				for (dx = 0; dx < scale; dx++) {
+					int px = x + col * scale + dx;
+
+					if (px < 0 || px >= screen_w)
+						continue;
+
+					novalk_write_pixel(px, py, color);
+				}
+			}
+		}
+	}
+}
+
+void video_draw_text(int x, int y, int scale, unsigned int fg,
+		     unsigned int bg, const char *s)
+{
+	unsigned int fgc, bgc;
+	int i;
+
+	if (!pGD || !cfb_fb_addrs || !s || scale < 1)
+		return;
+
+	fgc = novalk_pack_color(fg);
+	bgc = novalk_pack_color(bg);
+
+	for (i = 0; s[i]; i++)
+		novalk_draw_glyph(x + i * MTK_VFW * scale, y, scale,
+				  fgc, bgc, (unsigned char)s[i]);
+}
+
+int video_text_width(int scale, const char *s)
+{
+	if (!s || scale < 1)
+		return 0;
+
+	return (int)strlen(s) * MTK_VFW * scale;
+}
+
 //package second
 void fbcon_set_color(unsigned int bg, unsigned int fg)
 {
