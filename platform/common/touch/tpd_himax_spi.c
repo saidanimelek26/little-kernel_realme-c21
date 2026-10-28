@@ -1068,46 +1068,54 @@ static int himax_spi_read_event_raw(u8 *ev)
 	u8 v;
 	int ret;
 
-	/*
-	 * Vendor order (himax_read_event_stack + himax_burst_enable(0)):
-	 * no AHB burst, plain window access, then burst back on so that
-	 * the next register read still works.
-	 */
+	/* Disable burst */
 	if (himax_burst_enable(0))
 		return -1;
 
-	v = 0x00;	/* AHB auto read off */
+	/* Disable AHB auto read */
+	v = 0x00;
 	if (himax_bus_write(HIMAX_REG_AHB_CTRL, &v, 1))
-		return -1;
+		goto err_burst;
 
-	ret = -1;
-	if (!himax_spi_no_dma) {
-		ret = himax_bus_read(HIMAX_REG_EVENT_STACK, ev,
-				     HIMAX_EVENT_LEN);
-		if (ret) {
-			himax_spi_no_dma = 1;
-			himax_spi_dead = 0;	/* the bus itself answered before */
-			dprintf(CRITICAL,
-				"tpd: spi DMA event read failed, using FIFO frames\n");
-		}
-	}
+	/* Set address to event stack */
+	v = (u8)HIMAX_REG_EVENT_STACK;
+	if (himax_bus_write(HIMAX_REG_AHB_ADDR, &v, 1))
+		goto err_ahb_ctrl;
 
-	if (ret) {
-		/*
-		 * The 59 byte frame is the only transfer that needs DMA
-		 * (the LK FIFO is 32 bytes deep).  Read the very same frame
-		 * with two FIFO transfers that keep CS asserted in
-		 * between, so the controller still sees one command
-		 * followed by 56 clocked-in bytes.
-		 */
-		ret = himax_spi_read_event_paused(ev);
-	}
+	/* Direction: read */
+	v = 0x00;
+	if (himax_bus_write(HIMAX_REG_AHB_DIR, &v, 1))
+		goto err_ahb_addr;
 
-	v = 0x01;	/* AHB auto read on */
+	/* Read data */
+	ret = himax_bus_read(HIMAX_REG_AHB_RDATA, ev, HIMAX_EVENT_LEN);
+	if (ret)
+		goto err_ahb_dir;
+
+	/* Re-enable AHB auto read */
+	v = 0x01;
 	if (himax_bus_write(HIMAX_REG_AHB_CTRL, &v, 1))
-		return -1;
+		goto err_ahb_dir;
 
-	return ret;
+	/* Re-enable burst */
+	if (himax_burst_enable(1))
+		goto err_ahb_ctrl;
+
+	return 0;
+
+err_ahb_dir:
+	/* Attempt to restore state */
+	v = 0x01;
+	himax_bus_write(HIMAX_REG_AHB_DIR, &v, 1);
+err_ahb_addr:
+	v = 0x00;
+	himax_bus_write(HIMAX_REG_AHB_ADDR, &v, 1);
+err_ahb_ctrl:
+	v = 0x01;
+	himax_bus_write(HIMAX_REG_AHB_CTRL, &v, 1);
+err_burst:
+	himax_burst_enable(1);
+	return -1;
 }
 
 static int himax_spi_checksum_ok(const u8 *ev)
