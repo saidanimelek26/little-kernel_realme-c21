@@ -31,6 +31,10 @@ CUSTOM_LK_LCM = "hx83102d_hdp_dsi_vdo_truly_truly_zal3251"
 DEFINES += HX83102D_HDP_DSI_VDO_TRULY_TRULY_ZAL3251
 DEFINES += MTK_ROUND_CORNER_SUPPORT
 
+# Touch (Himax HX83112A) support for the boot menu.
+# Set to "no" to build a keys-only boot menu.
+MTK_TPD_SUPPORT = yes
+
 # Boot Logo (720x1600)
 BOOT_LOGO := hdplus1600
 
