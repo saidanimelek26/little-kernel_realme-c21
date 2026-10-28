@@ -34,6 +34,7 @@ struct keypad_dts_data {
 void set_kpd_pmic_mode(void);
 void disable_PMIC_kpd_clock(void);
 void enable_PMIC_kpd_clock(void);
+void mtk_keypad_init(void);
 BOOL mtk_detect_key(unsigned short key);
 BOOL mtk_detect_pmic_just_rst(void);
 

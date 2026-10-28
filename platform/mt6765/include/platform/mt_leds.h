@@ -101,6 +101,7 @@ void leds_battery_low_charging(void);
 void leds_battery_medium_charging(void);
 void mt65xx_backlight_on(void);
 void mt65xx_backlight_off(void);
+void mt65xx_backlight_max(void);
 void leds_init(void);
 void leds_deinit(void);
 #else
@@ -110,6 +111,7 @@ static void leds_battery_low_charging(void) {}
 static void leds_battery_medium_charging(void) {}
 static inline void mt65xx_backlight_on(void) {}
 static void mt65xx_backlight_off(void) {}
+static inline void mt65xx_backlight_max(void) {}
 static void leds_init(void) {}
 static void leds_deinit(void) {}
 #endif
