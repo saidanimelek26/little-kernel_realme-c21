@@ -1126,14 +1126,20 @@ int himax_spi_tpd_read_event(int *x, int *y)
 	u8 ev[HIMAX_EVENT_LEN];
 	int num_points;
 	int i;
+	int no_dma_saved;
 
 	if (!himax_spi_ready)
 		return -1;
 
+	/* Force FIFO-only mode for event read to avoid DMA issues */
+	no_dma_saved = himax_spi_no_dma;
+	himax_spi_no_dma = 1;
 	if (himax_spi_read_event_raw(ev)) {
 		himax_spi_bad_frames++;
+		himax_spi_no_dma = no_dma_saved;
 		return -1;
 	}
+	himax_spi_no_dma = no_dma_saved;
 
 	num_points = ev[HIMAX_EVENT_POINTS];
 	if (num_points == 0xff) {
