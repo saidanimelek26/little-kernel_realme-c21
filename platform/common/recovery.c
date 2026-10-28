@@ -148,6 +148,40 @@ BOOL recovery_set_fastboot_cmd(void)
 	return TRUE;
 }
 
+/*
+ * C21 / RMX3201: clear the Android bootloader control block (BCB) command.
+ *
+ * Only the command/status/recovery fields of the command page are zeroed,
+ * not the whole misc partition, so slot metadata / OTA result stay intact.
+ */
+BOOL recovery_clear_command(void)
+{
+	struct misc_message misc_msg;
+#if !defined(MTK_EMMC_SUPPORT) && !defined(MTK_UFS_SUPPORT)
+#ifndef MTK_COMBO_NAND_SUPPORT
+	const off_t offset = (off_t)(devinfo.pagesize) * MISC_COMMAND_PAGE;
+#else
+	const off_t offset = (off_t)mtk_nand_page_size() * MISC_COMMAND_PAGE;
+#endif
+#else
+	const off_t offset = 0;
+#endif
+	int ret;
+
+	memset(&misc_msg, 0, sizeof(misc_msg));
+
+	ret = partition_write(MISC_PARTITION, offset,
+			      (uchar *)&misc_msg, (size_t)sizeof(misc_msg));
+	if (ret < 0) {
+		dprintf(CRITICAL, "[%s] clear BCB command failed (%d)\n",
+			MODULE_NAME, ret);
+		return FALSE;
+	}
+
+	dprintf(INFO, "[%s] BCB command cleared\n", MODULE_NAME);
+	return TRUE;
+}
+
 BOOL recovery_check_command_trigger(void)
 {
 	struct misc_message misc_msg;
@@ -206,17 +240,27 @@ BOOL recovery_check_command_trigger(void)
 		 * when FBE fails.  The recovery image on this device is signed
 		 * with a different key than vbmeta, so LK rejects it and panics
 		 * in boot_info.c before Android can be started again.  Ignore
-		 * the command and boot normally; use the stock LK + stock
-		 * recovery when recovery is really needed.
+		 * the command, clear it (so it can not loop) and boot normally;
+		 * use the boot menu when recovery is really needed.
 		 */
-		dprintf(INFO, "ignore boot-recovery command, boot normal\n");
+		dprintf(INFO, "C21: ignore boot-recovery command, boot normal\n");
+		recovery_clear_command();
 		g_boot_mode = NORMAL_BOOT;
 		return FALSE;
 	}
 
 	if (strcmp(misc_msg.command, "boot-fastboot")==0) {
-		g_boot_mode = RECOVERY_BOOT;
-		return TRUE;
+		/*
+		 * C21/RMX3201: boot-fastboot is a one-shot Android request for
+		 * fastbootd.  Nothing used to clear it when fastbootd was never
+		 * reached, so every following boot fell back to fastboot /
+		 * recovery.  Clear it and keep normal boot; the boot menu is
+		 * then displayed like on any other power-on.
+		 */
+		dprintf(INFO, "C21: clear sticky boot-fastboot command, boot normal\n");
+		recovery_clear_command();
+		g_boot_mode = NORMAL_BOOT;
+		return FALSE;
 	}
 
 	return FALSE;
