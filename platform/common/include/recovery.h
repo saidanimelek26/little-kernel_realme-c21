@@ -44,6 +44,7 @@ struct misc_message {
 };
 
 extern BOOL recovery_check_command_trigger(void) __attribute__((weak));
+BOOL recovery_clear_command(void);
 BOOL check_ota_result(void);
 BOOL clear_ota_result(void);
 BOOL recovery_set_fastboot_cmd(void);
