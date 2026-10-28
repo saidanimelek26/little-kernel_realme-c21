@@ -129,6 +129,19 @@ struct mtk_spi_bus_config {
 #define    SPI_CPOL	0x02
 	u32 spi_mode;
 	u32 tick_delay;
+	/*
+	 * Bit order inside every byte.
+	 *
+	 * The MTK controller can shift each byte out / in LSB first (the
+	 * reset default used by the LK driver) or MSB first, which is what
+	 * every standard SPI slave -- the Himax touch controller included --
+	 * expects.  Leaving this at 0 while talking to a normal SPI device
+	 * silently bit-reverses every command byte, so the slave never
+	 * decodes a valid opcode and never drives MISO.
+	 *
+	 * 0 = LSB first (legacy LK behaviour), 1 = MSB first.
+	 */
+	u32 msb_first;
 };
 
 struct spi_transfer {

@@ -63,6 +63,7 @@
 #include <sys/types.h>
 #include <target/cust_key.h>
 #include <video.h>
+#include <boot_menu.h>
 #ifdef MTK_TPD_SUPPORT
 #include <dev/tpd.h>
 #endif
@@ -116,7 +117,7 @@ static const struct boot_menu_entry ui_entry[] = {
 /* Computed layout (pixels). */
 static int g_w, g_h;
 static int g_card_x, g_card_w, g_card_h, g_card_gap, g_cards_top;
-static int g_title_y, g_subtitle_y, g_device_y, g_accent_y;
+static int g_title_y, g_subtitle_y, g_device_y, g_credit_y, g_accent_y;
 static int g_footer_y;
 #ifdef MTK_TPD_SUPPORT
 static int g_touch_ok;
@@ -154,7 +155,7 @@ static void novalk_layout(void)
 
 	footer_h = 4 * (16 * HINT_SCALE + 4);
 
-	content = title_h + 16 + sub_h + 10 + sub_h + 24 + 4 + 70 +
+	content = title_h + 16 + sub_h + 10 + sub_h + 12 + sub_h + 16 + 4 + 70 +
 		  cards_total + 90 + footer_h;
 
 	top = (g_h - content) / 2;
@@ -164,7 +165,8 @@ static void novalk_layout(void)
 	g_title_y = top;
 	g_subtitle_y = g_title_y + title_h + 16;
 	g_device_y = g_subtitle_y + sub_h + 10;
-	g_accent_y = g_device_y + sub_h + 24;
+	g_credit_y = g_device_y + sub_h + 12;
+	g_accent_y = g_credit_y + sub_h + 16;
 	g_cards_top = g_accent_y + 4 + 70;
 	g_footer_y = g_cards_top + cards_total + 90;
 }
@@ -192,6 +194,18 @@ static void novalk_paint_header(void)
 				NOVA_TEXT, NOVA_BG, "BOOT MENU");
 	novalk_draw_text_center(g_w / 2, g_device_y, DESC_SCALE,
 				NOVA_TEXT_DIM, NOVA_BG, "REALME C21  -  RMX3201");
+
+	/* "Developed by" in dim, the name in accent. */
+	{
+		int prefix_w = video_text_width(DESC_SCALE, NOVALK_CREDIT_PREFIX);
+		int name_w = video_text_width(DESC_SCALE, NOVALK_CREDIT_NAME);
+		int cx = (g_w - (prefix_w + name_w)) / 2;
+
+		video_draw_text(cx, g_credit_y, DESC_SCALE, NOVA_TEXT_DIM,
+				NOVA_BG, NOVALK_CREDIT_PREFIX);
+		video_draw_text(cx + prefix_w, g_credit_y, DESC_SCALE,
+				NOVA_ACCENT, NOVA_BG, NOVALK_CREDIT_NAME);
+	}
 
 	video_fill_rect(NOVA_ACCENT, g_w / 2 - 60, g_accent_y, 120, 4);
 }

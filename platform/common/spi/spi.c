@@ -40,6 +40,7 @@ static int spi_bus_num = -1;
 static struct mtk_spi_bus_config spi_default_config = {
 	.spi_mode = 0,
 	.tick_delay = 0,
+	.msb_first = 0,		/* legacy LK bit order, see spi.h */
 };
 
 static void mtk_spi_reset(int bus_num)
@@ -371,12 +372,21 @@ void mtk_spi_init(int bus_num, struct mtk_spi_bus_config *spi_config)
 		reg_val &= ~SPI_CMD_CPOL_EN;
 
 	/* set the mlsbx and mlsbtx */
-	reg_val &= ~SPI_CMD_TXMSBF_EN;
-	reg_val &= ~SPI_CMD_RXMSBF_EN;
+	if (spi_bus_config->msb_first) {
+		reg_val |= SPI_CMD_TXMSBF_EN;
+		reg_val |= SPI_CMD_RXMSBF_EN;
+	} else {
+		reg_val &= ~SPI_CMD_TXMSBF_EN;
+		reg_val &= ~SPI_CMD_RXMSBF_EN;
+	}
 
 	/* set the tx/rx endian */
 	reg_val &= ~SPI_CMD_TX_ENDIAN_EN;
 	reg_val &= ~SPI_CMD_RX_ENDIAN_EN;
+
+	/* CS active low, sample on the normal edge (match the kernel) */
+	reg_val &= ~(1 << SPI_CMD_CS_POL_SHIFT);
+	reg_val &= ~(1 << SPI_CMD_SAMPLE_SEL_SHIFT);
 
 	/* clear pause mode */
 	reg_val &= ~SPI_CMD_PAUSE_EN;

@@ -15,6 +15,7 @@
  *
  *   drivers/input/touchscreen/mediatek/hxchipset_hx83102p/himax_platform.c
  *     SPI mode 3 (CPHA | CPOL), 8 bits per word
+ *     tx_mlsb = rx_mlsb = 1, cs_pol = 0  ->  MSB first, CS active low
  *     write : one transfer, { 0xF2, reg, data... }
  *     read  : { 0xF3, reg, 0x00 } followed by N bytes; the payload are the
  *             N bytes clocked in after the three byte header
@@ -78,6 +79,20 @@
 #define HIMAX_REG_EVENT_STACK	0x30
 
 #define HIMAX_REG_ICID		0x900000d0
+/*
+ * Firmware handshake: after the (zero flash) firmware has been loaded and
+ * started it reports 0xec 0x01 here, see himax_hx83102d_reload_to_active().
+ */
+#define HIMAX_REG_FW_STATE	0x900000e4
+#define HIMAX_FW_STATE0		0xec
+#define HIMAX_FW_STATE1		0x01
+
+/* Firmware restart used by himax_sense_on_by_sys_rst(). */
+#define HIMAX_REG_SENSE_MAGIC	0x9000005c
+#define HIMAX_REG_SYS_RESET	0x90000018
+#define HIMAX_SYS_RESET_VAL	0x55
+#define HIMAX_SPI_SENSE_TRIES	50
+#define HIMAX_SPI_SENSE_MS	5
 
 /* SPI wire protocol opcodes. */
 #define HIMAX_SPI_WRITE		0xf2
@@ -227,6 +242,35 @@ static int himax_ahb_read(u32 addr, u8 *data, u32 len)
 	return 0;
 }
 
+/*
+ * Burst write: one 8 byte transfer, { LE32(address), LE32(value) }.
+ * This is himax_flash_write_burst() from the vendor driver, used to poke
+ * the AHB registers that are not reachable through the plain 0xf2 path.
+ */
+static int himax_flash_write_burst(u32 addr, u32 val)
+{
+	u8 b[8];
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		b[i] = (u8)(addr >> (8 * i));
+		b[i + 4] = (u8)(val >> (8 * i));
+	}
+
+	return himax_bus_write(HIMAX_REG_AHB_ADDR, b, sizeof(b));
+}
+
+/* True when the Himax firmware is running and past its reload. */
+static int himax_fw_alive(void)
+{
+	u8 d[4];
+
+	if (himax_ahb_read(HIMAX_REG_FW_STATE, d, sizeof(d)))
+		return 0;
+
+	return d[0] == HIMAX_FW_STATE0 && d[1] == HIMAX_FW_STATE1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Reset / pin mux                                                    */
 /* ------------------------------------------------------------------ */
@@ -255,24 +299,156 @@ static void himax_spi_reset_pulse(void)
 /* Probe                                                              */
 /* ------------------------------------------------------------------ */
 
-static int himax_spi_read_id(u32 *id)
+/*
+ * Read the driver IC ID from AHB 0x900000d0.
+ *
+ * The four bytes come back as { x, 0x2X, 0x10, 0x83 }; after dropping the
+ * low byte the value reads 0x0083102X, exactly what the vendor
+ * hx83102d_ic_id_read() logs as "83,10,2X".
+ *
+ * Return:
+ *   0  a plausible Himax ID (0x83102a/2b/2d/2e)
+ *   1  the chip answered with something else (0xffffff: MISO idle high,
+ *      0x000000: bus stuck low)
+ *  -1  the transfer itself failed
+ */
+static int himax_spi_read_id(u32 *id, u8 raw[4])
 {
 	u8 d[4];
+	int i;
 
 	if (himax_ahb_read(HIMAX_REG_ICID, d, sizeof(d)))
 		return -1;
+
+	for (i = 0; i < 4; i++)
+		raw[i] = d[i];
 
 	*id = ((u32)d[0]) | ((u32)d[1] << 8) |
 	      ((u32)d[2] << 16) | ((u32)d[3] << 24);
 	*id >>= 8;
 
+	if (((*id >> 16) & 0xff) != HIMAX_PRODUCT_ID_FAMILY)
+		return 1;
+	if (((*id >> 8) & 0xff) != 0x10)
+		return 1;
+
 	return 0;
+}
+
+/*
+ * Register echo test, straight out of himax_interface_on(): both 0x13 and
+ * 0x0d are readable and echo what was written.  This proves that the chip
+ * decoded our command bytes ("0xf3" must arrive as 0xf3, not as the bit
+ * reversed 0xcf) and that MISO is really driven, so it works even on a
+ * controller whose IC ID register is not implemented.
+ */
+static int himax_spi_reg_echo(void)
+{
+	u8 v;
+	u8 r13 = 0;
+	u8 r0d = 0;
+
+	v = 0x31;
+	if (himax_bus_write(HIMAX_REG_BURST_CTRL, &v, 1))
+		return 0;
+
+	v = 0x10;
+	if (himax_bus_write(HIMAX_REG_BURST_MODE, &v, 1))
+		return 0;
+
+	if (himax_bus_read(HIMAX_REG_BURST_CTRL, &r13, 1))
+		return 0;
+
+	if (himax_bus_read(HIMAX_REG_BURST_MODE, &r0d, 1))
+		return 0;
+
+	return r13 == 0x31 && r0d == 0x10;
+}
+
+/*
+ * One detection round.  Returns 0 when the controller answered (valid IC
+ * ID, or a live register window), 1 when nothing answered and -1 on a bus
+ * failure.
+ */
+static int himax_spi_detect(u32 *id, u8 raw[4], const char *stage)
+{
+	u8 st[4];
+	int ret;
+
+	ret = himax_spi_read_id(id, raw);
+	if (ret == 0) {
+		dprintf(CRITICAL,
+			"tpd: spi%d %s id 0x%06x (%02x %02x %02x %02x)\n",
+			himax_spi_bus, stage, *id,
+			raw[0], raw[1], raw[2], raw[3]);
+		return 0;
+	}
+
+	if (ret < 0)
+		return -1;
+
+	/*
+	 * Not every Himax part implements 0x900000d0 the same way; a plain
+	 * register echo still tells us that the SPI link itself is healthy.
+	 */
+	if (himax_spi_reg_echo()) {
+		dprintf(CRITICAL,
+			"tpd: spi%d %s alive (reg echo), id %02x %02x %02x %02x\n",
+			himax_spi_bus, stage,
+			raw[0], raw[1], raw[2], raw[3]);
+		return 0;
+	}
+
+	if (himax_spi_dead)
+		return -1;
+
+	/* Firmware already running: it answers the reload handshake. */
+	if (himax_ahb_read(HIMAX_REG_FW_STATE, st, sizeof(st)) == 0 &&
+	    st[0] == HIMAX_FW_STATE0 && st[1] == HIMAX_FW_STATE1) {
+		dprintf(CRITICAL, "tpd: spi%d %s fw alive\n",
+			himax_spi_bus, stage);
+		return 0;
+	}
+
+	if (himax_spi_dead)
+		return -1;
+
+	return 1;
+}
+
+/*
+ * Restart the firmware so that it starts scanning, following
+ * himax_sense_on_by_sys_rst() / himax_hx83102d_reload_to_active():
+ *
+ *   0x9000005c <- 0
+ *   0x90000018 <- 0x55      (system reset)
+ *   poll 0x900000e4 until 0xec 0x01
+ */
+static int himax_spi_sense_on(void)
+{
+	int i;
+
+	if (himax_flash_write_burst(HIMAX_REG_SENSE_MAGIC, 0))
+		return -1;
+
+	if (himax_flash_write_burst(HIMAX_REG_SYS_RESET, HIMAX_SYS_RESET_VAL))
+		return -1;
+
+	for (i = 0; i < HIMAX_SPI_SENSE_TRIES; i++) {
+		if (himax_fw_alive())
+			return 0;
+		mdelay(HIMAX_SPI_SENSE_MS);
+	}
+
+	return -1;
 }
 
 int himax_spi_tpd_probe(u32 *product_id)
 {
 	struct mtk_spi_bus_config cfg;
+	u8 raw[4] = { 0 };
 	u32 id = 0;
+	int ret;
 	int i;
 
 	himax_spi_ready = 0;
@@ -284,6 +460,14 @@ int himax_spi_tpd_probe(u32 *product_id)
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.spi_mode = HIMAX_SPI_MODE;
 	cfg.tick_delay = 0;
+	/*
+	 * The vendor SPI core is configured with tx_mlsb = rx_mlsb = 1,
+	 * i.e. MSB first.  The LK controller defaults to LSB first, which
+	 * bit-reverses every byte on the wire (0xf3 goes out as 0xcf) and
+	 * leaves the chip unable to decode any command, so MISO just idles
+	 * high and every read returns 0xffffff.
+	 */
+	cfg.msb_first = 1;
 
 	himax_spi_bus = init_spi_bus_by_reg(HIMAX_SPI_REG_BASE,
 					    HIMAX_SPI_PAD_SELECT, &cfg);
@@ -295,62 +479,69 @@ int himax_spi_tpd_probe(u32 *product_id)
 	/*
 	 * The panel driver has already powered the TDDI up, so the
 	 * controller normally answers without being reset.  Only pulse the
-	 * reset line when it does not, so a controller that the preloader
-	 * or the LCM code is driving is not disturbed.
+	 * reset line when it does not: that line is dedicated to the touch
+	 * side (the LCM reset is GPIO45), but it still restarts the chip.
 	 */
-	if (himax_spi_read_id(&id) == 0) {
-		dprintf(CRITICAL, "tpd: spi%d cs0 id 0x%06x (no reset)\n",
-			himax_spi_bus, id);
-	} else {
-		dprintf(CRITICAL, "tpd: spi%d cs0 no answer, reset pulse\n",
+	ret = himax_spi_detect(&id, raw, "cs0");
+
+	if (ret < 0) {
+		dprintf(CRITICAL,
+			"tpd: spi%d transfer failed, controller not clocked?\n",
 			himax_spi_bus);
+		return -1;
+	}
+
+	if (ret > 0) {
+		dprintf(CRITICAL,
+			"tpd: spi%d cs0 silent (id %02x %02x %02x %02x), reset pulse\n",
+			himax_spi_bus, raw[0], raw[1], raw[2], raw[3]);
 
 		himax_spi_reset_pulse();
-
-		id = 0;
 		himax_spi_dead = 0;
-		for (i = 0; i < HIMAX_SPI_ID_TRIES; i++) {
-			if (himax_spi_read_id(&id) == 0)
-				break;
 
-			/* A bus level failure means the controller itself is
-			 * not working (clock gated); waiting will not help. */
+		for (i = 0; i < HIMAX_SPI_ID_TRIES; i++) {
+			ret = himax_spi_detect(&id, raw, "cs0 after reset");
+			if (ret <= 0)
+				break;
 			if (himax_spi_dead)
 				break;
-
 			mdelay(HIMAX_SPI_ID_RETRY_MS);
 		}
 
-		if (himax_spi_dead) {
+		if (ret > 0) {
 			dprintf(CRITICAL,
-				"tpd: spi%d transfer failed, controller not clocked?\n",
-				himax_spi_bus);
+				"tpd: spi%d cs0 never answered (last id %02x %02x %02x %02x)\n",
+				himax_spi_bus, raw[0], raw[1], raw[2], raw[3]);
 			return -1;
 		}
 
-		if (i == HIMAX_SPI_ID_TRIES) {
+		if (ret < 0) {
 			dprintf(CRITICAL,
-				"tpd: spi%d cs0 still silent after reset\n",
+				"tpd: spi%d transfer failed after reset\n",
 				himax_spi_bus);
 			return -1;
 		}
-
-		dprintf(CRITICAL, "tpd: spi%d cs0 id 0x%06x after reset (%d ms)\n",
-			himax_spi_bus, id, i * HIMAX_SPI_ID_RETRY_MS);
 	}
 
-	if ((id >> 16) != HIMAX_PRODUCT_ID_FAMILY) {
-		if (id == 0 || id == 0xffffff) {
-			dprintf(CRITICAL,
-				"tpd: spi%d implausible id 0x%x, giving up\n",
-				himax_spi_bus, id);
-			return -1;
-		}
-
+	/*
+	 * The event stack is only filled while the firmware runs in active
+	 * mode, so enter that mode the same way the kernel does
+	 * (himax_sense_on(0): 0x9000005c <- 0, 0x90000018 <- 0x55, then
+	 * wait until 0x900000e4 reads 0xec 0x01).
+	 *
+	 * This is a zero-flash part: the firmware is downloaded into SRAM by
+	 * the kernel on every cold boot.  When it is not there nothing can
+	 * report a point, and it is better to say so than to pretend the
+	 * touch controller is usable.
+	 */
+	if (himax_spi_sense_on()) {
 		dprintf(CRITICAL,
-			"tpd: spi%d unexpected id 0x%x, using it anyway\n",
-			himax_spi_bus, id);
+			"tpd: spi%d fw not running (zero-flash part without kernel firmware)\n",
+			himax_spi_bus);
+		return -1;
 	}
+
+	dprintf(CRITICAL, "tpd: spi%d fw active\n", himax_spi_bus);
 
 	if (product_id)
 		*product_id = id;
@@ -420,30 +611,49 @@ static int himax_spi_read_event_paused(u8 *ev)
 
 static int himax_spi_read_event_raw(u8 *ev)
 {
-	u8 off = 0x00;
-
-	/* AHB auto read must be off before the stack is fetched. */
-	if (himax_bus_write(HIMAX_REG_AHB_CTRL, &off, 1))
-		return -1;
-
-	if (!himax_spi_no_dma) {
-		if (himax_bus_read(HIMAX_REG_EVENT_STACK, ev,
-				   HIMAX_EVENT_LEN) == 0)
-			return 0;
-
-		himax_spi_no_dma = 1;
-		himax_spi_dead = 0;	/* the bus itself answered before */
-		dprintf(CRITICAL,
-			"tpd: spi DMA event read failed, using FIFO frames\n");
-	}
+	u8 v;
+	int ret;
 
 	/*
-	 * The 59 byte frame is the only transfer that needs DMA (the LK
-	 * FIFO is 32 bytes deep).  Read the very same frame with two FIFO
-	 * transfers that keep CS asserted in between, so the controller
-	 * still sees one command followed by 56 clocked-in bytes.
+	 * Vendor order (himax_read_event_stack + himax_burst_enable(0)):
+	 * no AHB burst, plain window access, then burst back on so that
+	 * the next register read still works.
 	 */
-	return himax_spi_read_event_paused(ev);
+	if (himax_burst_enable(0))
+		return -1;
+
+	v = 0x00;	/* AHB auto read off */
+	if (himax_bus_write(HIMAX_REG_AHB_CTRL, &v, 1))
+		return -1;
+
+	ret = -1;
+	if (!himax_spi_no_dma) {
+		ret = himax_bus_read(HIMAX_REG_EVENT_STACK, ev,
+				     HIMAX_EVENT_LEN);
+		if (ret) {
+			himax_spi_no_dma = 1;
+			himax_spi_dead = 0;	/* the bus itself answered before */
+			dprintf(CRITICAL,
+				"tpd: spi DMA event read failed, using FIFO frames\n");
+		}
+	}
+
+	if (ret) {
+		/*
+		 * The 59 byte frame is the only transfer that needs DMA
+		 * (the LK FIFO is 32 bytes deep).  Read the very same frame
+		 * with two FIFO transfers that keep CS asserted in
+		 * between, so the controller still sees one command
+		 * followed by 56 clocked-in bytes.
+		 */
+		ret = himax_spi_read_event_paused(ev);
+	}
+
+	v = 0x01;	/* AHB auto read on */
+	if (himax_bus_write(HIMAX_REG_AHB_CTRL, &v, 1))
+		return -1;
+
+	return ret;
 }
 
 static int himax_spi_checksum_ok(const u8 *ev)

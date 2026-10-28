@@ -36,6 +36,13 @@
 #if !defined (__BOOT_MENU_H__)
 #define __BOOT_MENU_H__
 
+/*
+ * Author credit, drawn once on the boot menu and once on the fastboot
+ * screen ("Developed by Melek Saidani", name in the accent colour).
+ */
+#define NOVALK_CREDIT_PREFIX	"Developed by "
+#define NOVALK_CREDIT_NAME	"Melek Saidani"
+
 void boot_menu_select();
 
 /*
