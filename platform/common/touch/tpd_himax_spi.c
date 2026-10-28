@@ -240,7 +240,7 @@ static int himax_ahb_read(u32 addr, u8 *data, u32 len)
 		return -1;
 
 	tmp[0] = 0x00;
-	if (himax_bus_write(HIMAX_REG_AHB_DIR, tmp, 1))
+	if (himax_bus_write(HIMAX_REG_AHB_DIR, &tmp, 1))
 		return -1;
 
 	if (himax_bus_read(HIMAX_REG_AHB_RDATA, data, len))
@@ -489,11 +489,11 @@ static u32 himax_zf_crc_hw(u32 addr, u32 len)
 		return 0xffffffffu;
 
 	for (i = 0; i < HX_ZF_CRC_TRIES; i++) {
-		if (himax_ahb_read(HX_ZF_CRC_CTRL, d, sizeof(d)))
+		if (himax_ahb_read(HIMAX_ZF_CRC_CTRL, d, sizeof(d)))
 			return 0xffffffffu;
 
 		if (!(d[0] & 0x01)) {
-			if (himax_ahb_read(HX_ZF_CRC_VALUE, d, sizeof(d)))
+			if (himax_ahb_read(HIMAX_ZF_CRC_VALUE, d, sizeof(d)))
 				return 0xffffffffu;
 
 			return ((u32)d[0]) | ((u32)d[1] << 8) |
@@ -575,10 +575,10 @@ static int himax_zf_download(void)
 		const u8 *e = img + HX_ZF_PART_TABLE + i * 16;
 
 		part[i].sram = (u32)e[0] | ((u32)e[1] << 8) |
-			       ((u32)e[2] << 16) | ((u32)e[3] << 24);
+		       ((u32)e[2] << 16) | ((u32)e[3] << 24);
 		part[i].size = (u32)e[4] | ((u32)e[5] << 8);
 		part[i].off = (u32)e[8] | ((u32)e[9] << 8) |
-			      ((u32)e[10] << 16);
+		      ((u32)e[10] << 16);
 		part[i].ovl = -1;
 
 		/* Overlay sections carry 0x55 0x66 and their index. */
@@ -855,12 +855,12 @@ static int himax_spi_wait_alive(void)
  * himax_sense_on_by_sys_rst() / himax_hx83102d_reload_to_active():
  *
  *   0x9000005c <- 0
- *   0x90000018 <- 0x55      (system reset)
- *   write 0x90000048 <- 0xec and read it back until it answers 0x01ec
- *
- * If the system reset leaves it silent, retry the way himax_sense_on(0)
- * does, through the 0x31/0x32 ROM reset.
- */
+*   0x90000018 <- 0x55      (system reset)
+*   write 0x90000048 <- 0xec and read it back until it answers 0x01ec
+*
+* If the system reset leaves it silent, retry the way himax_sense_on(0)
+* does, through the 0x31/0x32 ROM reset.
+*/
 static int himax_spi_sense_on(void)
 {
 	/* himax_interface_on(): burst mode on, address auto increment off. */
@@ -909,7 +909,7 @@ int himax_spi_tpd_probe(u32 *product_id)
 	cfg.msb_first = 1;
 
 	himax_spi_bus = init_spi_bus_by_reg(HIMAX_SPI_REG_BASE,
-					    HIMAX_SPI_PAD_SELECT, &cfg);
+				    HIMAX_SPI_PAD_SELECT, &cfg);
 	if (himax_spi_bus < 0) {
 		dprintf(CRITICAL, "tpd: spi2 registration failed\n");
 		return -1;
@@ -970,9 +970,9 @@ int himax_spi_tpd_probe(u32 *product_id)
 	 *
 	 * This is a zero-flash part: the firmware lives in SRAM only and the
 	 * kernel reloads it on every cold boot, after LK has run.  The ROM
-	 * reports 0x00 0x02 in 0x900000e4 while it waits for an image; that
-	 * is the cold boot case, and the embedded image is pushed into SRAM
-	 * right away instead of waiting for a firmware that is not there.
+	* reports 0x00 0x02 in 0x900000e4 while it waits for an image; that
+	* is the cold boot case, and the embedded image is pushed into SRAM
+	* right away instead of waiting for a firmware that is not there.
 	 */
 	if (himax_rom_waiting() || himax_spi_sense_on()) {
 		dprintf(CRITICAL,
@@ -1077,25 +1077,17 @@ static int himax_spi_read_event_raw(u8 *ev)
 	if (himax_bus_write(HIMAX_REG_AHB_CTRL, &v, 1))
 		goto err_burst;
 
-	/* Set address to event stack */
-	v = (u8)HIMAX_REG_EVENT_STACK;
-	if (himax_bus_write(HIMAX_REG_AHB_ADDR, &v, 1))
+	/* Use FIFO-only read for event stack (two transfers with CS held) */
+	ret = himax_spi_read_event_paused(ev);
+	if (ret) {
+		/* If FIFO-only fails, we have no fallback */
 		goto err_ahb_ctrl;
-
-	/* Direction: read */
-	v = 0x00;
-	if (himax_bus_write(HIMAX_REG_AHB_DIR, &v, 1))
-		goto err_ahb_addr;
-
-	/* Read data */
-	ret = himax_bus_read(HIMAX_REG_AHB_RDATA, ev, HIMAX_EVENT_LEN);
-	if (ret)
-		goto err_ahb_dir;
+	}
 
 	/* Re-enable AHB auto read */
 	v = 0x01;
 	if (himax_bus_write(HIMAX_REG_AHB_CTRL, &v, 1))
-		goto err_ahb_dir;
+		goto err_ahb_ctrl;
 
 	/* Re-enable burst */
 	if (himax_burst_enable(1))
@@ -1103,17 +1095,10 @@ static int himax_spi_read_event_raw(u8 *ev)
 
 	return 0;
 
-err_ahb_dir:
+err_ahb_ctrl:
 	/* Attempt to restore state */
 	v = 0x01;
-	himax_bus_write(HIMAX_REG_AHB_DIR, &v, 1);
-err_ahb_addr:
-	v = 0x00;
-	himax_bus_write(HIMAX_REG_AHB_ADDR, &v, 1);
-err_ahb_ctrl:
-	v = 0x01;
 	himax_bus_write(HIMAX_REG_AHB_CTRL, &v, 1);
-err_burst:
 	himax_burst_enable(1);
 	return -1;
 }
@@ -1135,6 +1120,7 @@ int himax_spi_tpd_read_event(int *x, int *y)
 	int num_points;
 	int i;
 	int no_dma_saved;
+	int ret;
 
 	if (!himax_spi_ready)
 		return -1;
@@ -1142,7 +1128,20 @@ int himax_spi_tpd_read_event(int *x, int *y)
 	/* Force FIFO-only mode for event read to avoid DMA issues */
 	no_dma_saved = himax_spi_no_dma;
 	himax_spi_no_dma = 1;
-	if (himax_spi_read_event_raw(ev)) {
+	ret = -1;
+	for (i = 0; i < 3; i++) {
+		ret = himax_spi_read_event_raw(ev);
+		if (ret == 0)
+			break;
+		mdelay(1);
+	}
+	if (ret) {
+		/* Log raw buffer on persistent failure for debugging */
+		if (himax_spi_bad_frames < 5) {  /* Limit log spam */
+			dprintf(CRITICAL,
+				"tpd: spi event read failed after 3 attempts, raw: %02x %02x %02x %02x %02x %02x\n",
+				ev[0], ev[1], ev[2], ev[3], ev[4], ev[5]);
+		}
 		himax_spi_bad_frames++;
 		himax_spi_no_dma = no_dma_saved;
 		return -1;
