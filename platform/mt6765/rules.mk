@@ -18,6 +18,10 @@ SELINUX_STATUS := 3
 
 LK_MAIN_DTB_BUILT_IN := yes
 
+# NovaLK: LK has to enable the MT6765 keypad controller itself, see
+# mtk_key.c:mtk_keypad_init().  Only enabled for platforms that implement it.
+DEFINES += MTK_KPD_CTRL_SUPPORT
+
 # overwrite SELINUX_STATUS value with PRJ_SELINUX_STATUS, if defined. it's by project variable.
 ifdef PRJ_SELINUX_STATUS
 	SELINUX_STATUS := $(PRJ_SELINUX_STATUS)

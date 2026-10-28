@@ -277,6 +277,7 @@ void boot_mode_select(void)
 		dprintf(CRITICAL, "[BOOTMENU] power-on: showing boot menu\n");
 		mtk_wdt_disable();
 		mt65xx_backlight_on();
+		mt65xx_backlight_max();
 		boot_menu_select();
 		mtk_wdt_init();
 

@@ -447,6 +447,21 @@ void mt65xx_backlight_off(void)
 	mt65xx_leds_brightness_set(MT65XX_LED_TYPE_LCD, LED_OFF);
 }
 
+/*
+ * NovaLK: force the LCD backlight to the maximum level.
+ *
+ * mt65xx_leds_brightness_set() caches the last programmed level in
+ * g_lastlevel[] and returns -1 without touching the hardware when the
+ * requested level equals the cached one.  LK usually calls
+ * mt65xx_backlight_on() first, so invalidate the cache before asking for
+ * LED_FULL, otherwise the panel can stay at a lower level (dim boot menu).
+ */
+void mt65xx_backlight_max(void)
+{
+	g_lastlevel[MT65XX_LED_TYPE_LCD] = -1;
+	mt65xx_leds_brightness_set(MT65XX_LED_TYPE_LCD, LED_FULL);
+}
+
 struct cust_mt65xx_led *get_cust_led_dtsi(void)
 {
 	static bool isDTinited = false;
