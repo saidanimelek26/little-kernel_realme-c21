@@ -29,4 +29,21 @@ void video_set_fg_color(unsigned char r, unsigned char g, unsigned char b);
 void video_set_bg_color(unsigned char r, unsigned char g, unsigned char b);
 void video_set_default_color(void);
 
+/*
+ * NovaLK graphics helpers.
+ *
+ * These draw with absolute pixel coordinates on panels whose
+ * MTK_LCM_PHYSICAL_ROTATION is "0" (the Realme C21 panel).  They do NOT
+ * flush the panel: call video_refresh() once when the frame is complete.
+ * Colors are 0x00RRGGBB.
+ */
+int  video_screen_width(void);
+int  video_screen_height(void);
+void video_refresh(void);
+
+void video_fill_rect(unsigned int color, int x, int y, int width, int height);
+void video_draw_text(int x, int y, int scale, unsigned int fg,
+		     unsigned int bg, const char *s);
+int  video_text_width(int scale, const char *s);
+
 #endif
