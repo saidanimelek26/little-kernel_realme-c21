@@ -240,7 +240,7 @@ static int himax_ahb_read(u32 addr, u8 *data, u32 len)
 		return -1;
 
 	tmp[0] = 0x00;
-	if (himax_bus_write(HIMAX_REG_AHB_DIR, &tmp, 1))
+	if (himax_bus_write(HIMAX_REG_AHB_DIR, tmp, 1))
 		return -1;
 
 	if (himax_bus_read(HIMAX_REG_AHB_RDATA, data, len))
@@ -489,11 +489,11 @@ static u32 himax_zf_crc_hw(u32 addr, u32 len)
 		return 0xffffffffu;
 
 	for (i = 0; i < HX_ZF_CRC_TRIES; i++) {
-		if (himax_ahb_read(HIMAX_ZF_CRC_CTRL, d, sizeof(d)))
+		if (himax_ahb_read(HX_ZF_CRC_CTRL, d, sizeof(d)))
 			return 0xffffffffu;
 
 		if (!(d[0] & 0x01)) {
-			if (himax_ahb_read(HIMAX_ZF_CRC_VALUE, d, sizeof(d)))
+			if (himax_ahb_read(HX_ZF_CRC_VALUE, d, sizeof(d)))
 				return 0xffffffffu;
 
 			return ((u32)d[0]) | ((u32)d[1] << 8) |
@@ -1075,7 +1075,7 @@ static int himax_spi_read_event_raw(u8 *ev)
 	/* Disable AHB auto read */
 	v = 0x00;
 	if (himax_bus_write(HIMAX_REG_AHB_CTRL, &v, 1))
-		goto err_burst;
+		goto err_ahb_ctrl;
 
 	/* Use FIFO-only read for event stack (two transfers with CS held) */
 	ret = himax_spi_read_event_paused(ev);
