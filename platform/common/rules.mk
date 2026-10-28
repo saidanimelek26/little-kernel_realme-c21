@@ -142,6 +142,12 @@ endif
 MODULES += $(LOCAL_DIR)/atf
 MODULES += $(LOCAL_DIR)/boot
 MODULES += $(LOCAL_DIR)/boot_menu
+
+ifeq ($(MTK_TPD_SUPPORT),yes)
+MODULES += $(LOCAL_DIR)/touch
+DEFINES += MTK_TPD_SUPPORT
+endif
+
 ifeq ($(strip $(MICROTRUST_TEE_SUPPORT)),yes)
 MODULES += $(LOCAL_DIR)/teei
 endif
