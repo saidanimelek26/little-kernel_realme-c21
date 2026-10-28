@@ -106,5 +106,9 @@ MTK_MT22_MODE := H1
 MTK_ENABLE_GENIEZONE = yes
 DEFINES += NO_POWER_OFF=y
 
+# Boot menu: how long the power-on menu waits for a key before booting Android.
+# 0 waits forever (the phone only boots after a selection).
+DEFINES += BOOT_MENU_TIMEOUT_MS=10000
+
 # key
 MT6765_USE_FCHR_ENB_KEY = yes
