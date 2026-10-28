@@ -4,20 +4,18 @@
 /*
  * NovaLK touch panel configuration for Realme C21 / RMX3201 (MT6765).
  *
- * The touch controller of this device is a Himax HX83112A
- * ("himax,hx83112a_nf", reported by Device Info HW from the running
- * Android kernel).  It sits at the usual Himax 7-bit I2C address 0x48.
+ * The touch controller of this device is a Himax HX83102D TDDI wired to
+ * SPI2 (0x11012000, chip select 0), reset on GPIO178, IRQ on GPIO0.  This
+ * was confirmed by the LK log (nothing ACKs on I2C at 0x48) and by the
+ * official Realme C21 kernel DT (oppo6765_20701.dts: the tp node is a
+ * child of &spi2).  The SPI transport is implemented in
+ * platform/common/touch/tpd_himax_spi.c.
  *
- * The I2C bus number and the reset GPIO are described by the vendor DTBO,
- * which is not part of this repository.  tpd.c therefore:
- *   1. looks for a "himax"/"hx83112" node in the overlayed DTB (built-in
- *      main DTB + flashed DTBO) and uses its reg/reset-gpio/bus, then
- *   2. if that fails, scans I2C0..I2C6 for a HX83112A product ID.
+ * The I2C probe below it is only a fallback for a differently wired
+ * board; on this device it never succeeds.
  *
- * Values below are only used for the fallback path and for coordinate
- * mapping.  Set TPD_RST_GPIO to the real reset GPIO number once known if
- * the automatic probe cannot reach the chip (the panel may be held in
- * reset by the preloader).
+ * Values below are only used for that fallback and for coordinate
+ * mapping.
  */
 
 #define TPD_PANEL_WIDTH       720

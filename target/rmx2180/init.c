@@ -40,6 +40,7 @@
 #include <platform/mt_rtc.h>
 #include <platform/mtk_key.h>
 #include <platform/mt_gpio.h>
+#include <boot_menu.h>
 
 extern void dmb(void);
 
@@ -62,7 +63,12 @@ unsigned board_machtype(void)
 /* Do any target specific intialization needed before entering fastboot mode */
 void target_fastboot_init(void)
 {
-
+  /*
+   * Draw the NovaLK fastboot screen.  Without this the panel keeps
+   * whatever boot_menu_select() cleared to (black) until the phone
+   * reboots, which is what the stock LK does.
+   */
+  novalk_fastboot_ui_show();
 }
 
 extern BOOTMODE g_boot_mode;

@@ -39,4 +39,15 @@ u32 himax_tpd_product_id(void);
  */
 int himax_tpd_read_event(int *x, int *y);
 
+/*
+ * SPI transport (HX83102D on the C21, see tpd_himax_spi.c).
+ *
+ * himax_spi_tpd_probe() muxes the SPI2 pads, registers the controller,
+ * probes the IC id (with a reset pulse only if the first read fails) and
+ * leaves the driver ready for himax_spi_tpd_read_event().
+ */
+int himax_spi_tpd_probe(u32 *product_id);
+int himax_spi_tpd_read_event(int *x, int *y);
+u32 himax_spi_tpd_product_id(void);
+
 #endif /* __TPD_HIMAX_H */

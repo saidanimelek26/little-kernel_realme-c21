@@ -38,4 +38,14 @@
 
 void boot_menu_select();
 
+/*
+ * NovaLK fastboot screen (platform/common/boot_menu/fastboot_ui.c).
+ *
+ * novalk_fastboot_ui_show() paints the fastboot screen in the boot menu
+ * style; novalk_fastboot_ui_usb() repaints only the USB status card and is
+ * safe to call before the screen exists (it does nothing then).
+ */
+void novalk_fastboot_ui_show(void);
+void novalk_fastboot_ui_usb(int online);
+
 #endif /* __BOOT_MENU_H__ */

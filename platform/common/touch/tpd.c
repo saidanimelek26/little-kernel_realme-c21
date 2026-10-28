@@ -16,6 +16,13 @@ static int tpd_bus = -1;
 static u32 tpd_product_id;
 static char tpd_label[16] = "touch";
 
+/* Transport the controller was found on. */
+#define TPD_TRANSPORT_NONE	0
+#define TPD_TRANSPORT_SPI	1
+#define TPD_TRANSPORT_I2C	2
+
+static int tpd_transport = TPD_TRANSPORT_NONE;
+
 /*
  * MT6765 I2C controller base addresses, in controller index order.
  * The vendor DT describes the touch controller as a child of one of these
@@ -117,7 +124,9 @@ static int tpd_dt_lookup(int *bus, u8 *addr, int *rst_gpio)
 
 static void tpd_set_name(u32 product_id)
 {
-	if ((product_id & 0xffff00) == 0x831100)
+	if ((product_id & 0xffffff) == 0x83102d)
+		strcpy(tpd_label, "HX83102D");
+	else if ((product_id & 0xffff00) == 0x831100)
 		strcpy(tpd_label, "HX83112A");
 	else if ((product_id & 0xffff00) == 0x831000)
 		strcpy(tpd_label, "HX83102");
@@ -141,6 +150,24 @@ int tpd_init(void)
 		return 0;
 
 	/*
+	 * 0. The C21 touch controller is wired to SPI2, not I2C.  This is
+	 *    the path that works on the device: the I2C bus scan below never
+	 *    succeeds because nothing ACKs at 0x48.
+	 */
+#ifdef MTK_SPI_SUPPORT
+	if (himax_spi_tpd_probe(&product_id) == 0) {
+		tpd_transport = TPD_TRANSPORT_SPI;
+		tpd_bus = -1;
+		tpd_product_id = product_id;
+		tpd_ready = 1;
+		tpd_set_name(tpd_product_id);
+		dprintf(CRITICAL, "tpd: %s ready on spi2 cs0 (id 0x%x)\n",
+			tpd_label, tpd_product_id);
+		return 0;
+	}
+#endif
+
+	/*
 	 * 1. Use the device tree when it describes the controller: that
 	 *    gives us the exact bus, slave address and reset GPIO.
 	 */
@@ -152,6 +179,7 @@ int tpd_init(void)
 						    &product_id)) {
 			tpd_bus = dt_bus;
 			tpd_product_id = product_id;
+			tpd_transport = TPD_TRANSPORT_I2C;
 			tpd_ready = 1;
 			goto done;
 		}
@@ -167,6 +195,7 @@ int tpd_init(void)
 		if (!himax_tpd_probe(bus, addr, rst_gpio, &product_id)) {
 			tpd_bus = bus;
 			tpd_product_id = product_id;
+			tpd_transport = TPD_TRANSPORT_I2C;
 			tpd_ready = 1;
 			goto done;
 		}
@@ -204,7 +233,18 @@ int tpd_read(int *x, int *y)
 	if (!tpd_ready)
 		return -1;
 
-	ret = himax_tpd_read_event(&px, &py);
+	ret = 0;
+	switch (tpd_transport) {
+	case TPD_TRANSPORT_SPI:
+		ret = himax_spi_tpd_read_event(&px, &py);
+		break;
+	case TPD_TRANSPORT_I2C:
+		ret = himax_tpd_read_event(&px, &py);
+		break;
+	default:
+		return -1;
+	}
+
 	if (ret <= 0)
 		return ret;
 

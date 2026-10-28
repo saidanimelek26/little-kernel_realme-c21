@@ -6,8 +6,8 @@
 /*
  * NovaLK touch panel framework.
  *
- * Only the Himax HX83112A controller (Realme C21 / RMX3201) is supported.
- * tpd_init() probes it (DT first, then I2C bus scan) and never blocks the
+ * Only the Himax HX83102D controller (Realme C21 / RMX3201) is
+ * supported, over SPI2.  tpd_init() probes it and never blocks the
  * boot if it is not found: touch simply stays disabled and the boot menu
  * keeps working with the hardware keys and its timeout.
  */

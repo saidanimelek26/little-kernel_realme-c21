@@ -148,6 +148,14 @@ MODULES += $(LOCAL_DIR)/touch
 DEFINES += MTK_TPD_SUPPORT
 endif
 
+# Generic MTK SPI controller driver.  Only built for platforms that do not
+# ship their own copy (mt6768 keeps platform/mt6768/mt_spi.c); enabled by
+# project/<target>.mk with MTK_SPI_SUPPORT = yes.
+ifeq ($(MTK_SPI_SUPPORT),yes)
+MODULES += $(LOCAL_DIR)/spi
+DEFINES += MTK_SPI_SUPPORT
+endif
+
 ifeq ($(strip $(MICROTRUST_TEE_SUPPORT)),yes)
 MODULES += $(LOCAL_DIR)/teei
 endif

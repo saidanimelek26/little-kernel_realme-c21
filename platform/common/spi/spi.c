@@ -32,6 +32,7 @@
 #include <malloc.h>
 #include <libfdt.h>
 #include <lk_builtin_dtb.h>
+#include <arch/ops.h>		/* arch_clean_cache_range() for the DMA path */
 
 static struct mtk_spi_bus *spi_bus[BUS_COUNT] = { NULL };
 static int spi_bus_num = -1;
@@ -448,6 +449,39 @@ int init_spi_bus_from_dt(const char *compatible,
 	dprintf(SPEW, "reg addr : %p, pad_select : %d\n",
 			spi_bus[spi_bus_num]->reg_addr,
 			spi_bus[spi_bus_num]->pad_select);
+	mtk_spi_init(spi_bus_num, config);
+
+	return spi_bus_num;
+}
+
+int init_spi_bus_by_reg(u32 reg_base, u32 pad_select,
+			struct mtk_spi_bus_config *config)
+{
+	struct mtk_spi_bus *bus;
+
+	if (spi_bus_num + 1 >= BUS_COUNT) {
+		dprintf(CRITICAL, "spi: no free bus slot\n");
+		return -1;
+	}
+
+	bus = malloc(sizeof(struct mtk_spi_bus));
+	if (!bus) {
+		dprintf(CRITICAL, "spi: failed to allocate bus\n");
+		return -1;
+	}
+
+	memset(bus, 0, sizeof(struct mtk_spi_bus));
+	bus->reg_addr = (struct mtk_spi_regs *)reg_base;
+	bus->state = MTK_SPI_IDLE;
+	bus->pad_select = pad_select;
+	bus->spi_bus_fdt_offset = 0;
+
+	spi_bus_num++;
+	spi_bus[spi_bus_num] = bus;
+
+	dprintf(SPEW, "spi: bus %d regs 0x%x pad_select %d\n",
+		spi_bus_num, reg_base, pad_select);
+
 	mtk_spi_init(spi_bus_num, config);
 
 	return spi_bus_num;

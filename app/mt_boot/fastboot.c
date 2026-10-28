@@ -41,6 +41,7 @@
 #include <platform/mtk_wdt.h>
 #include <version.h>
 #include <verified_boot_common.h>   // for sec_query_warranty()
+#include <boot_menu.h>             // for novalk_fastboot_ui_usb()
 #include "sys_commands.h"
 #include <block_generic_interface.h>
 #include <part_interface.h>
@@ -515,8 +516,10 @@ static void fastboot_notify(struct udc_gadget *gadget, unsigned event)
 {
 	if (event == UDC_EVENT_ONLINE) {
 		event_signal(&usb_online, 0);
+		novalk_fastboot_ui_usb(1);
 	} else if (event == UDC_EVENT_OFFLINE) {
 		event_unsignal(&usb_online);
+		novalk_fastboot_ui_usb(0);
 	}
 }
 

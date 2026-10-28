@@ -139,12 +139,17 @@ static void himax_hw_reset(int rst_gpio)
 	if (rst_gpio < 0)
 		return;
 
+	/*
+	 * Same pulse as the SPI transport: assert (low) for 5 ms, release
+	 * (high) and let the firmware boot.  The line must be left released,
+	 * otherwise the controller stays in reset for the rest of the boot.
+	 */
 	mt_set_gpio_mode(rst_gpio, GPIO_MODE_00);
 	mt_set_gpio_dir(rst_gpio, GPIO_DIR_OUT);
-	mt_set_gpio_out(rst_gpio, GPIO_OUT_ONE);
-	mdelay(20);
 	mt_set_gpio_out(rst_gpio, GPIO_OUT_ZERO);
-	mdelay(2);
+	mdelay(5);
+	mt_set_gpio_out(rst_gpio, GPIO_OUT_ONE);
+	mdelay(30);
 }
 
 static int himax_read_product_id(u32 *product_id)

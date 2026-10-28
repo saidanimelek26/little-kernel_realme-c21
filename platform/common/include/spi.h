@@ -20,7 +20,12 @@ enum {
 	SPI_HZ = 109000000,
 	MTK_FIFO_DEPTH = 32,
 	MTK_PACKET_SIZE = 1024,
-	MTK_TXRX_TIMEOUT_US = 10*1000*1000,
+	/*
+	 * Bounded so that a dead clock / gated controller fails fast instead
+	 * of freezing the boot menu for ten seconds.  The longest transfer
+	 * used here is 59 bytes, which takes ~32 us at 15 MHz.
+	 */
+	MTK_TXRX_TIMEOUT_US = 500*1000,
 	MTK_ARBITRARY_VALUE = 0xdadadada
 };
 
@@ -138,4 +143,18 @@ struct spi_transfer {
 void mtk_spi_init(int bus_num, struct mtk_spi_bus_config *spi_config);
 int init_spi_bus_from_dt(const char *compatible,
 				struct mtk_spi_bus_config *config);
+
+/*
+ * Register a controller by its register base instead of by DT node.
+ *
+ * Some LK device trees (the Realme C21 one, for instance) carry no child
+ * node for the touch controller, so there is nothing to look up even
+ * though the controller itself is described.  This variant takes the base
+ * address and the pad-select value straight from target knowledge.
+ *
+ * Returns the bus number (>= 0) or -1 on failure.
+ */
+int init_spi_bus_by_reg(u32 reg_base, u32 pad_select,
+				struct mtk_spi_bus_config *config);
+
 int spi_sync(int bus_num, struct spi_transfer *transfer);

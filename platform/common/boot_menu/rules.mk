@@ -6,4 +6,5 @@ INCLUDES += \
 	-I$(LK_TOP_DIR)/platform/common/include
 
 OBJS += \
-	$(LOCAL_DIR)/boot_menu.o
+	$(LOCAL_DIR)/boot_menu.o \
+	$(LOCAL_DIR)/fastboot_ui.o
