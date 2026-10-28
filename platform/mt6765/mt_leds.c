@@ -434,10 +434,56 @@ void leds_deinit(void)
 	mt65xx_leds_brightness_set(MT65XX_LED_TYPE_BLUE, LED_OFF);
 }
 
+#ifdef NOVALK_BACKLIGHT_DBV_MAX
+/*
+ * NovaLK: the RMX3201 panel (HX83102D, dev/lcm/hx83102d_hdp_*) takes a
+ * 12-bit DBV value in DCS 0x51 (0..4095).  The generic LED API only knows
+ * 0..255, so LED_FULL becomes DBV 0x00FF - about 6% brightness, which is
+ * the "screen is very dim" regression seen on hardware.  Program the panel
+ * maximum through the customer backlight callback instead.
+ *
+ * Returns 0 when the callback handled the request, -1 when the configured
+ * backlight is not a customer (LCM/PWM) one and the generic path must be
+ * used.
+ */
+static int novalk_backlight_set_dbv(unsigned int dbv)
+{
+	struct cust_mt65xx_led *list = get_cust_led_dtsi();
+	struct cust_mt65xx_led *lcd;
+
+	if (list == NULL)
+		list = get_cust_led_list();
+
+	if (list == NULL)
+		return -1;
+
+	lcd = &list[MT65XX_LED_TYPE_LCD];
+
+	if (lcd->mode != MT65XX_LED_MODE_CUST_LCM &&
+	    lcd->mode != MT65XX_LED_MODE_CUST_BLS_PWM)
+		return -1;
+
+	if (lcd->data == 0)
+		return -1;
+
+	return ((cust_brightness_set)(lcd->data))(dbv);
+}
+#endif
+
 void mt65xx_backlight_on(void)
 {
 	enum led_brightness backlight_level = get_cust_led_default_level();
 	LEDS_INFO("[LEDS]LK: mt65xx_backlight_on:level =  %d\n\r",backlight_level);
+
+#ifdef NOVALK_BACKLIGHT_DBV_MAX
+	if (novalk_backlight_set_dbv(NOVALK_BACKLIGHT_DBV_MAX) == 0) {
+		/* Keep the cache "full" so a later LED_FULL request does not
+		 * reprogram the panel with the dim 0..255 value. */
+		g_lastlevel[MT65XX_LED_TYPE_LCD] = LED_FULL;
+		return;
+	}
+#endif
+
 	mt65xx_leds_brightness_set(MT65XX_LED_TYPE_LCD, backlight_level);
 }
 
@@ -458,6 +504,13 @@ void mt65xx_backlight_off(void)
  */
 void mt65xx_backlight_max(void)
 {
+#ifdef NOVALK_BACKLIGHT_DBV_MAX
+	if (novalk_backlight_set_dbv(NOVALK_BACKLIGHT_DBV_MAX) == 0) {
+		g_lastlevel[MT65XX_LED_TYPE_LCD] = LED_FULL;
+		return;
+	}
+#endif
+
 	g_lastlevel[MT65XX_LED_TYPE_LCD] = -1;
 	mt65xx_leds_brightness_set(MT65XX_LED_TYPE_LCD, LED_FULL);
 }

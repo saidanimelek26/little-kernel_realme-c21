@@ -38,6 +38,12 @@ MTK_TPD_SUPPORT = yes
 # Boot Logo (720x1600)
 BOOT_LOGO := hdplus1600
 
+# Backlight: the HX83102D panel takes a 12-bit DBV value (0..4095) in the
+# DCS 0x51 brightness command.  Passing the generic LED_FULL (255) gives
+# DBV 0x00FF (~6%) and a very dim screen, so mt65xx_backlight_on() programs
+# this value through the LCM callback instead.
+DEFINES += NOVALK_BACKLIGHT_DBV_MAX=4095
+
 # Debug
 DEBUG := 2
 DEFINES += WITH_DEBUG_UART=1

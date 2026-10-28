@@ -152,7 +152,7 @@ static void novalk_layout(void)
 	cards_total = BOOT_MENU_ENTRIES * g_card_h +
 		      (BOOT_MENU_ENTRIES - 1) * g_card_gap;
 
-	footer_h = 3 * (16 * HINT_SCALE + 4);
+	footer_h = 4 * (16 * HINT_SCALE + 4);
 
 	content = title_h + 16 + sub_h + 10 + sub_h + 24 + 4 + 70 +
 		  cards_total + 90 + footer_h;
@@ -259,11 +259,17 @@ static void novalk_paint_footer(int seconds_left)
 
 #ifdef MTK_TPD_SUPPORT
 	if (g_touch_ok) {
+		char tp[48];
+
+		snprintf(tp, sizeof(tp), "or tap an option  (%s)", tpd_name());
+		novalk_draw_text_center(g_w / 2, g_footer_y + 40, HINT_SCALE,
+					NOVA_TEXT_DIM, NOVA_BG, tp);
+	} else {
 		novalk_draw_text_center(g_w / 2, g_footer_y + 40, HINT_SCALE,
 					NOVA_TEXT_DIM, NOVA_BG,
-					"or tap an option");
-		timer_y = g_footer_y + 80;
+					"touch not detected  -  use the keys");
 	}
+	timer_y = g_footer_y + 80;
 #endif
 
 	if (BOOT_MENU_TIMEOUT_MS > 0) {

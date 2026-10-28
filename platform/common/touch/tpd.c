@@ -1,6 +1,7 @@
 #include <string.h>
 #include <printf.h>
 #include <platform/mt_typedefs.h>
+#include <platform/timer.h>
 #include <libfdt.h>
 #include <lk_builtin_dtb.h>
 #include <dev/tpd.h>
@@ -118,8 +119,12 @@ static void tpd_set_name(u32 product_id)
 {
 	if ((product_id & 0xffff00) == 0x831100)
 		strcpy(tpd_label, "HX83112A");
-	else if (product_id == 0x83100a)
-		strcpy(tpd_label, "HX83100A");
+	else if ((product_id & 0xffff00) == 0x831000)
+		strcpy(tpd_label, "HX83102");
+	else if ((product_id >> 16) == 0x83)
+		strcpy(tpd_label, "Himax");
+	else if (product_id)
+		strcpy(tpd_label, "touch");
 	else
 		strcpy(tpd_label, "Himax");
 }
@@ -135,7 +140,14 @@ int tpd_init(void)
 	if (tpd_ready)
 		return 0;
 
+	/*
+	 * 1. Use the device tree when it describes the controller: that
+	 *    gives us the exact bus, slave address and reset GPIO.
+	 */
 	if (tpd_dt_lookup(&dt_bus, &addr, &rst_gpio) == 0) {
+		dprintf(CRITICAL, "tpd: DT says i2c%d addr 0x%x rst %d\n",
+			dt_bus, addr, rst_gpio);
+
 		if (dt_bus >= 0 && !himax_tpd_probe(dt_bus, addr, rst_gpio,
 						    &product_id)) {
 			tpd_bus = dt_bus;
@@ -145,9 +157,12 @@ int tpd_init(void)
 		}
 	}
 
-	/* No usable DT node (the touch node of the built-in DTB only carries
-	 * a "goodix,touch" compatible without reg/gpio): scan every bus for
-	 * the standard Himax address. */
+	/*
+	 * 2. Otherwise scan every I2C controller for the standard Himax
+	 *    address.  The built-in LK DTB only carries a generic
+	 *    "goodix,touch" node without reg/reset GPIO, so this is the
+	 *    path used on the C21.
+	 */
 	for (bus = 0; bus <= TPD_MAX_BUS; bus++) {
 		if (!himax_tpd_probe(bus, addr, rst_gpio, &product_id)) {
 			tpd_bus = bus;
@@ -155,6 +170,10 @@ int tpd_init(void)
 			tpd_ready = 1;
 			goto done;
 		}
+
+		/* Give the next controller time to settle after a failed
+		 * transfer / possible reset. */
+		mdelay(2);
 	}
 
 	dprintf(CRITICAL, "tpd: no touch controller found, keys only\n");
