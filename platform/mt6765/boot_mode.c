@@ -181,44 +181,13 @@ void boot_mode_select(void)
 	if (recovery_check_command_trigger()) {
 		return;
 	}
-	ulong begin = get_timer(0);
 
-	/*we put key dectection here to detect key which is pressed*/
-	dprintf(INFO, "eng build\n");
-	while (get_timer(begin)<50) {
-
-
-		if (!factory_forbidden) {
-			if (mtk_detect_key(MT65XX_FACTORY_KEY)) {
-				dprintf(CRITICAL, "%s Detect key\n",MODULE_NAME);
-				dprintf(CRITICAL, "%s Enable factory mode\n",MODULE_NAME);
-				g_boot_mode = FACTORY_BOOT;
-				//video_printf("%s : detect factory mode !\n",MODULE_NAME);
-				return;
-			}
-		}
-
-		if (mtk_detect_key(MT65XX_BOOT_MENU_KEY)) {
-			dprintf(CRITICAL, "\n%s Check  boot menu\n",MODULE_NAME);
-			dprintf(CRITICAL, "%s Wait 50ms for special keys\n",MODULE_NAME);
-			mtk_wdt_disable();
-			/*************************/
-			mt65xx_backlight_on();
-			/*************************/
-			boot_menu_select();
-			mtk_wdt_init();
-			return;
-		}
-#ifdef MT65XX_RECOVERY_KEY
-		if (mtk_detect_key(MT65XX_RECOVERY_KEY)) {
-			dprintf(CRITICAL, "%s Detect cal key\n",MODULE_NAME);
-			dprintf(CRITICAL, "%s Enable recovery mode\n",MODULE_NAME);
-			g_boot_mode = RECOVERY_BOOT;
-			//video_printf("%s : detect recovery mode !\n",MODULE_NAME);
-			return;
-		}
-#endif
-	}
+	/*
+	 * C21 / RMX3201: the old 50 ms key window is gone.  The boot menu is
+	 * always displayed below, after the charger-boot detection had its
+	 * chance to run, so a real power-on always stops in the menu.
+	 */
+	(void)factory_forbidden;
 #else
 
 	/*We put conditions here to filer some cases that can not do key detection*/
@@ -291,6 +260,37 @@ void boot_mode_select(void)
 		return;
 	} else {
 		dprintf(CRITICAL, "< Kernel Enter Normal Boot > \n");
+	}
+#endif
+
+#ifdef HAVE_LK_TEXT_MENU
+	/*
+	 * C21 / RMX3201: every real power-on stops in the boot menu
+	 * (Recovery / Fastboot / Normal Boot) instead of booting blindly or
+	 * silently landing in fastboot.
+	 *
+	 * Explicit "reboot bootloader" requests and meta mode returned above,
+	 * and charger-only boots returned from the block above, so this point
+	 * is only reached on a normal power-on.
+	 */
+	if (g_boot_mode == NORMAL_BOOT) {
+		dprintf(CRITICAL, "[BOOTMENU] power-on: showing boot menu\n");
+		mtk_wdt_disable();
+		mt65xx_backlight_on();
+		boot_menu_select();
+		mtk_wdt_init();
+
+		/*
+		 * The menu choice must win over any stale "boot to fastboot"
+		 * request, otherwise the phone comes back to fastboot on the
+		 * next boot even after "Normal Boot" was selected.
+		 */
+		Set_Clr_RTC_PDN1_bit13(false);
+#ifdef MTK_ENTER_FASTBOOT_VIA_RGU
+		mtk_wdt_fastboot_set(0);
+#endif
+		dprintf(CRITICAL, "[BOOTMENU] boot mode after menu = %d\n",
+			g_boot_mode);
 	}
 #endif
 }
