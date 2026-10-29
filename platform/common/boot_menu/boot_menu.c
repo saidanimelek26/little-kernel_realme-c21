@@ -47,7 +47,7 @@
  * Input:
  *   - touch: tap directly on a card (Himax HX83112A, see dev/tpd.h)
  *   - keys : VOLUME_UP / VOLUME_DOWN move, POWER confirms
- *   - no input for BOOT_MENU_TIMEOUT_MS: boot NORMAL_BOOT
+ *   - no timeout: the menu waits until an option is confirmed
  *
  * The menu never changes the boot decision made earlier by
  * boot_mode_select(); it only sets g_boot_mode when the user confirms.
@@ -73,14 +73,6 @@
 
 #ifndef MTK_PMIC_PWR_KEY
 #define MTK_PMIC_PWR_KEY 8
-#endif
-
-/*
- * How long the boot menu waits for an input before it boots NORMAL_BOOT.
- * Define BOOT_MENU_TIMEOUT_MS=0 to wait forever.
- */
-#ifndef BOOT_MENU_TIMEOUT_MS
-#define BOOT_MENU_TIMEOUT_MS 10000
 #endif
 
 /* Font scales (the LK font is 8x16 pixels). */
@@ -265,15 +257,8 @@ static void novalk_paint_cards(int select)
 		novalk_paint_card(i, i == select);
 }
 
-static void novalk_paint_footer(int seconds_left)
+static void novalk_paint_footer(void)
 {
-	int timer_y = g_footer_y + 40;
-#if BOOT_MENU_TIMEOUT_MS > 0
-	char line[64];
-#else
-	(void)seconds_left;
-#endif
-
 	video_fill_rect(NOVA_BG, 0, g_footer_y - 16, g_w,
 			g_h - (g_footer_y - 16));
 
@@ -293,18 +278,7 @@ static void novalk_paint_footer(int seconds_left)
 					NOVA_TEXT_DIM, NOVA_BG,
 					"touch not detected  -  use the keys");
 	}
-	timer_y = g_footer_y + 80;
 #endif
-
-	if (BOOT_MENU_TIMEOUT_MS > 0) {
-		snprintf(line, sizeof(line), "Auto-boot in %d s", seconds_left);
-		novalk_draw_text_center(g_w / 2, timer_y, HINT_SCALE,
-					NOVA_ACCENT, NOVA_BG, line);
-	} else {
-		novalk_draw_text_center(g_w / 2, timer_y, HINT_SCALE,
-					NOVA_ACCENT, NOVA_BG,
-					"Waiting for your selection");
-	}
 }
 
 #if defined(MTK_TPD_SUPPORT) && NOVALK_TOUCH_DIAG
@@ -365,7 +339,6 @@ static int novalk_hit_test(int x, int y)
 void boot_menu_select(void)
 {
 	int select = BOOT_MENU_DEFAULT_ENTRY;
-	int seconds_left = -1;
 	int need_cards = 1;
 	int need_footer = 1;
 	int prev_up, prev_down, prev_pwr;
@@ -376,8 +349,6 @@ void boot_menu_select(void)
 	ulong diag_last = 0;
 #endif
 #endif
-	ulong begin = 0;
-	ulong last_timer = 0;
 
 	dprintf(INFO, "\n[BOOTMENU] NovaLK boot menu\n");
 
@@ -419,14 +390,9 @@ void boot_menu_select(void)
 	novalk_paint_background();
 	novalk_paint_header();
 	novalk_paint_cards(select);
-	novalk_paint_footer(BOOT_MENU_TIMEOUT_MS / 1000);
+	novalk_paint_footer();
 	novalk_paint_diag();
 	video_refresh();
-
-	seconds_left = BOOT_MENU_TIMEOUT_MS / 1000;
-
-	begin = get_timer(0);
-	last_timer = begin;
 
 	while (1) {
 		int up, down, pwr;
@@ -473,9 +439,6 @@ void boot_menu_select(void)
 					dprintf(INFO, "[BOOTMENU] touch %d,%d -> %d,%d hit %d\n",
 						tx, ty, sx, sy, hit);
 
-					/* Any touch counts as activity. */
-					begin = get_timer(0);
-
 					if (hit >= 0 && hit == select) {
 						/* Second tap on the highlighted card. */
 						break;
@@ -506,34 +469,11 @@ void boot_menu_select(void)
 #endif
 #endif
 
-		/* ---------------- timeout ---------------- */
-#if BOOT_MENU_TIMEOUT_MS > 0
-		if (get_timer(begin) >= BOOT_MENU_TIMEOUT_MS) {
-			dprintf(INFO, "[BOOTMENU] timeout, default selection\n");
-			select = BOOT_MENU_DEFAULT_ENTRY;
-			break;
-		}
-
-		if (get_timer(last_timer) >= 1000) {
-			ulong elapsed = get_timer(begin);
-			int left = (int)((BOOT_MENU_TIMEOUT_MS - elapsed + 999) /
-					 1000);
-
-			last_timer = get_timer(0);
-			if (left < 0)
-				left = 0;
-			if (left != seconds_left) {
-				seconds_left = left;
-				need_footer = 1;
-			}
-		}
-#endif
-
 		if (need_cards || need_footer) {
 			if (need_cards)
 				novalk_paint_cards(select);
 			if (need_footer) {
-				novalk_paint_footer(seconds_left);
+				novalk_paint_footer();
 				novalk_paint_diag();
 			}
 			video_refresh();

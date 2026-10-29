@@ -34,7 +34,7 @@
  *   +--------------------------+
  *   ----------------------------
  *        fastboot devices        <- accent
- *     POWER + VOL-  ->  reboot   <- dim
+ *     [RECOVERY] [SYSTEM]  <- small reboot buttons
  */
 
 #include <string.h>
@@ -45,6 +45,15 @@
 #include <platform/boot_mode.h>
 #include <video.h>
 #include <boot_menu.h>
+#include <platform/mt_rtc.h>
+#include <platform/mtk_wdt.h>
+#include <platform/timer.h>
+#include <dev/udc.h>
+#ifdef MTK_TPD_SUPPORT
+#include <kernel/thread.h>
+#include <dev/tpd.h>
+#include <target/cust_tpd.h>
+#endif
 
 /* Font scales, same values as the boot menu. */
 #define UI_TITLE_SCALE	5	/* 40 x 80 */
@@ -101,8 +110,6 @@ static int g_info_x, g_info_y, g_info_w, g_info_h;
 extern char sn_buf[];			/* set by set_serial_num() before us */
 extern int get_bat_volt(int times);	/* mV */
 extern unsigned get_unlocked_status(void);
-extern ssize_t partition_read(const char *part_name, off_t offset,
-			      u8 *data, size_t size);
 
 static void ui_text_center(int cx, int y, int scale, u32 fg, u32 bg,
 			   const char *s)
@@ -150,62 +157,6 @@ static void ui_info_add(const char *label, const char *value, u32 color)
  * device ("os_version", the same value the kernel build encodes).
  * Nothing is shown when the header cannot be read or does not parse.
  */
-static int ui_android_version(char *out, int out_len)
-{
-	static u8 hdr[4096] __attribute__((aligned(64)));
-	u32 hdr_ver, os;
-	u32 rel, major, minor;
-	int year, month;
-	ssize_t len;
-
-	out[0] = '\0';
-
-	len = partition_read("boot", (off_t)0, hdr, sizeof(hdr));
-	if (len != (ssize_t)sizeof(hdr))
-		return -1;
-
-	if (memcmp(hdr, "ANDROID!", 8) != 0)
-		return -1;
-
-	hdr_ver = (u32)hdr[0x28] | ((u32)hdr[0x29] << 8) |
-		  ((u32)hdr[0x2a] << 16) | ((u32)hdr[0x2b] << 24);
-
-	/* Header v3 moved os_version next to the kernel/ramdisk sizes. */
-	if (hdr_ver >= 3) {
-		os = (u32)hdr[0x10] | ((u32)hdr[0x11] << 8) |
-		     ((u32)hdr[0x12] << 16) | ((u32)hdr[0x13] << 24);
-	} else {
-		os = (u32)hdr[0x2c] | ((u32)hdr[0x2d] << 8) |
-		     ((u32)hdr[0x2e] << 16) | ((u32)hdr[0x2f] << 24);
-	}
-
-	if (!os)
-		return -1;
-
-	/* A[31:25] B[24:18] C[17:11] (Y-2000)[10:4] M[3:0]. */
-	rel = (os >> 25) & 0x7f;
-	major = (os >> 18) & 0x7f;
-	minor = (os >> 11) & 0x7f;
-	year = (int)((os >> 4) & 0x7f) + 2000;
-	month = (int)(os & 0x0f);
-
-	if (rel < 4 || rel > 30)
-		return -1;
-
-	if (major && year >= 2000 && month >= 1 && month <= 12)
-		snprintf(out, out_len, "%u.%u.%u (%d-%02d)",
-			 rel, major, minor, year, month);
-	else if (major)
-		snprintf(out, out_len, "%u.%u.%u", rel, major, minor);
-	else if (year >= 2000 && month >= 1 && month <= 12)
-		snprintf(out, out_len, "%u (%d-%02d)", rel, year, month);
-	else
-		snprintf(out, out_len, "%u", rel);
-
-	return 0;
-}
-
-/* Copy a fixed size, possibly unterminated, bootloader string. */
 static void ui_copy_str(char *out, int out_len, const char *in, int in_len)
 {
 	int i;
@@ -240,20 +191,41 @@ static void ui_info_collect(void)
 		ui_info_add("STATE", unlocked ? "UNLOCKED" : "LOCKED",
 			    unlocked ? NOVA_ACCENT : NOVA_TEXT);
 
-	if (ui_android_version(buf, sizeof(buf)) == 0)
-		ui_info_add("ANDROID", buf, NOVA_TEXT);
-
 	/* Serial from efuse / product info; hide the LK placeholder. */
 	if (sn_buf[0] && strcmp(sn_buf, "0123456789ABCDEF") != 0)
 		ui_info_add("SERIAL", sn_buf, NOVA_TEXT);
 
-	/* Preloader version is the bootloader's own build string. */
+	/*
+	 * Installed RAM, summed from the DRAM ranks the preloader detected
+	 * and handed over in the boot arguments (a measured value).
+	 */
 	if (g_boot_arg) {
+		u64 total = 0;
+		u32 i;
+
+		for (i = 0; i < g_boot_arg->dram_rank_num && i < 4; i++)
+			total += g_boot_arg->dram_rank_size[i];
+
+		if (total) {
+			u32 mb = (u32)(total >> 20);
+
+			if (mb >= 1024 && (mb % 1024) == 0)
+				snprintf(buf, sizeof(buf), "%u GB", mb / 1024);
+			else
+				snprintf(buf, sizeof(buf), "%u MB", mb);
+			ui_info_add("RAM", buf, NOVA_TEXT);
+		}
+
+		/* Preloader version string as reported by the preloader. */
 		ui_copy_str(buf, sizeof(buf), g_boot_arg->pl_version,
 			    sizeof(g_boot_arg->pl_version));
 		if (buf[0])
-			ui_info_add("BOOTLOADER", buf, NOVA_TEXT);
+			ui_info_add("PRELOADER", buf, NOVA_TEXT);
 	}
+
+	/* Compile time stamp of this bootloader. */
+	snprintf(buf, sizeof(buf), "%s", __DATE__);
+	ui_info_add("LK BUILD", buf, NOVA_TEXT);
 
 	hw = mt_get_chip_hw_ver();
 	if (hw) {
@@ -329,6 +301,119 @@ static void ui_paint_status(int online)
 			       : "plug the cable into a computer");
 }
 
+/* ------------------------------------------------------------------ */
+/* Reboot buttons                                                     */
+/* ------------------------------------------------------------------ */
+
+#define UI_BTN_H	72
+#define UI_BTN_W	250
+#define UI_BTN_GAP	24
+
+enum { BTN_RECOVERY = 0, BTN_SYSTEM = 1, BTN_COUNT = 2 };
+
+static const char *const g_btn_label[BTN_COUNT] = { "RECOVERY", "SYSTEM" };
+static int g_btn_x[BTN_COUNT], g_btn_y;
+
+static void ui_paint_button(int idx, int pressed)
+{
+	u32 fill = pressed ? NOVA_SURFACE_SEL : NOVA_SURFACE;
+	u32 frame = pressed ? NOVA_ACCENT : NOVA_BORDER;
+	int x = g_btn_x[idx];
+	int y = g_btn_y;
+	int tw = video_text_width(UI_TEXT_SCALE, g_btn_label[idx]);
+
+	ui_card(x, y, UI_BTN_W, UI_BTN_H, fill, frame);
+	video_draw_text(x + (UI_BTN_W - tw) / 2,
+			y + (UI_BTN_H - UI_FONT_H * UI_TEXT_SCALE) / 2,
+			UI_TEXT_SCALE, pressed ? NOVA_ACCENT : NOVA_TEXT, fill,
+			g_btn_label[idx]);
+}
+
+#ifdef MTK_TPD_SUPPORT
+static int ui_btn_hit(int x, int y)
+{
+	int i;
+
+	for (i = 0; i < BTN_COUNT; i++) {
+		if (x >= g_btn_x[i] && x < g_btn_x[i] + UI_BTN_W &&
+		    y >= g_btn_y && y < g_btn_y + UI_BTN_H)
+			return i;
+	}
+
+	return -1;
+}
+
+/* Same sequence the fastboot "reboot" / "reboot-recovery" commands use. */
+static void ui_reboot(int idx)
+{
+	if (idx == BTN_RECOVERY)
+		Set_RTC_Recovery_Mode(1);
+
+	/* Disconnect USB first so the host does not hang on a dead device. */
+	udc_stop();
+	mdelay(500);
+	mtk_arch_reset(1);
+}
+
+/*
+ * The fastboot screen has no event loop of its own, so a small thread polls
+ * the touch controller.  If the boot menu already brought touch up this only
+ * reuses it; when fastboot was entered with the keys it brings it up here.
+ */
+static int ui_touch_thread(void *arg)
+{
+	int latched = 1;	/* ignore a finger already on the glass */
+	int tx, ty;
+
+	(void)arg;
+
+	if (tpd_init() != 0)
+		return 0;
+
+	for (;;) {
+		if (tpd_read(&tx, &ty) == 1) {
+			if (!latched) {
+				int sx = tx * video_screen_width() /
+					 TPD_PANEL_WIDTH;
+				int sy = ty * video_screen_height() /
+					 TPD_PANEL_HEIGHT;
+				int hit = ui_btn_hit(sx, sy);
+
+				latched = 1;
+				if (hit >= 0) {
+					ui_paint_button(hit, 1);
+					video_refresh();
+					ui_reboot(hit);
+				}
+			}
+		} else {
+			latched = 0;
+		}
+
+		thread_sleep(20);
+	}
+
+	return 0;
+}
+
+static void ui_touch_start(void)
+{
+	static int started;
+	thread_t *t;
+
+	if (started)
+		return;
+
+	t = thread_create("novalk_touch", ui_touch_thread, NULL,
+			 DEFAULT_PRIORITY, 16 * 1024);
+	if (!t)
+		return;
+
+	started = 1;
+	thread_resume(t);
+}
+#endif
+
 void novalk_fastboot_ui_show(void)
 {
 	int w, h, card_w, card_x;
@@ -362,7 +447,7 @@ void novalk_fastboot_ui_show(void)
 		  line_h + 8 + line_h + 26 + 4 + 80 +
 		  hero_h + 36 +
 		  (info_h ? info_h + 28 : 0) +
-		  UI_STATUS_H + 64 + 2 + 28 + line_h + 12 + line_h;
+		  UI_STATUS_H + 64 + 2 + 28 + line_h + 28 + UI_BTN_H;
 
 	top = (h - content) / 2;
 	if (top < 40)
@@ -443,14 +528,22 @@ void novalk_fastboot_ui_show(void)
 
 	ui_text_center(w / 2, y, UI_TEXT_SCALE, NOVA_ACCENT, NOVA_BG,
 		       "fastboot devices");
-	y += line_h + 12;
+	y += line_h + 28;
 
-	ui_text_center(w / 2, y, UI_TEXT_SCALE, NOVA_TEXT_DIM, NOVA_BG,
-		       "POWER + VOL-  ->  reboot");
+	/* Two small reboot buttons side by side: recovery and system. */
+	g_btn_y = y;
+	g_btn_x[BTN_RECOVERY] = w / 2 - UI_BTN_GAP / 2 - UI_BTN_W;
+	g_btn_x[BTN_SYSTEM] = w / 2 + UI_BTN_GAP / 2;
+	ui_paint_button(BTN_RECOVERY, 0);
+	ui_paint_button(BTN_SYSTEM, 0);
 
 	video_refresh();
 
 	g_ui_shown = 1;
+
+#ifdef MTK_TPD_SUPPORT
+	ui_touch_start();
+#endif
 }
 
 /*
