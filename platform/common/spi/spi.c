@@ -76,6 +76,25 @@ static void mtk_spi_set_cs(int bus_num, bool enable)
 	}
 }
 
+/*
+ * Keep CS asserted after the next transfer completes.
+ *
+ * The MTK controller only holds CS across transfers when PAUSE_EN is set
+ * *before* the transfer starts (the Linux driver sets it when the message
+ * begins).  Setting it afterwards, as spi_sync() used to do, lets the first
+ * transfer of a chain release CS at its end, so the following RESUME has no
+ * frame left to continue.
+ */
+static void mtk_spi_pause_enable(int bus_num)
+{
+	u32 reg_val;
+	struct mtk_spi_regs *regs = spi_bus[bus_num]->reg_addr;
+
+	reg_val = DRV_Reg32(&regs->spi_cmd_reg);
+	reg_val |= 1 << SPI_CMD_PAUSE_EN_SHIFT;
+	mt_reg_sync_writel(reg_val, &regs->spi_cmd_reg);
+}
+
 static void mtk_spi_enable_transfer(int bus_num)
 {
 	u32 reg_val;
@@ -295,6 +314,10 @@ int spi_sync(int bus_num, struct spi_transfer *transfer)
 	}
 
 	spi_prepare_transfer(bus_num, transfer);
+
+	/* A chained transfer (cs_change == 0) must pause, not finish, the frame. */
+	if (!transfer->cs_change)
+		mtk_spi_pause_enable(bus_num);
 
 	while (size) {
 		min_size = size < MTK_PACKET_SIZE ? size : MTK_PACKET_SIZE;

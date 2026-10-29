@@ -125,5 +125,9 @@ DEFINES += NO_POWER_OFF=y
 # 0 waits forever (the phone only boots after a selection).
 DEFINES += BOOT_MENU_TIMEOUT_MS=10000
 
+# On-screen touch diagnostics in the boot menu (bring-up stage, firmware CRC
+# attempts, frame counters, last raw point).  Set to 0 once touch is verified.
+DEFINES += NOVALK_TOUCH_DIAG=1
+
 # key
 MT6765_USE_FCHR_ENB_KEY = yes

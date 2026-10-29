@@ -11,6 +11,9 @@
 #define TPD_MAX_BUS	6
 #define TPD_I2C_ADDR	0x48
 
+/* Filled by the transports, shown by the boot menu (see dev/tpd.h). */
+struct tpd_diag g_tpd_diag;
+
 static int tpd_ready;
 static int tpd_bus = -1;
 static u32 tpd_product_id;
@@ -167,6 +170,18 @@ int tpd_init(void)
 	}
 #endif
 
+#ifdef MTK_SPI_SUPPORT
+	/*
+	 * The SPI link answered but the controller could not be brought up
+	 * (firmware download failed): an I2C scan cannot help and would only
+	 * overwrite the failure reason shown on screen.
+	 */
+	if (g_tpd_diag.link_ok) {
+		dprintf(CRITICAL, "tpd: spi2 chip found but bring-up failed\n");
+		return -1;
+	}
+#endif
+
 	/*
 	 * 1. Use the device tree when it describes the controller: that
 	 *    gives us the exact bus, slave address and reset GPIO.
@@ -205,6 +220,8 @@ int tpd_init(void)
 		mdelay(2);
 	}
 
+	if (g_tpd_diag.err == TPD_ERR_NONE)
+		g_tpd_diag.err = TPD_ERR_NOT_FOUND;
 	dprintf(CRITICAL, "tpd: no touch controller found, keys only\n");
 	return -1;
 
@@ -270,6 +287,75 @@ int tpd_read(int *x, int *y)
 
 	*x = px;
 	*y = py;
+	g_tpd_diag.x = px;
+	g_tpd_diag.y = py;
 
 	return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* On-screen diagnostics                                              */
+/* ------------------------------------------------------------------ */
+
+const struct tpd_diag *tpd_get_diag(void)
+{
+	return &g_tpd_diag;
+}
+
+static const char *tpd_stage_name(int stage)
+{
+	switch (stage) {
+	case TPD_STAGE_PADS:		return "pads/clock";
+	case TPD_STAGE_SPI:		return "spi init";
+	case TPD_STAGE_RESET:		return "reset";
+	case TPD_STAGE_LINK:		return "link";
+	case TPD_STAGE_PARSE:		return "fw parse";
+	case TPD_STAGE_SENSE_OFF:	return "sense off";
+	case TPD_STAGE_FW_MAIN:		return "fw main";
+	case TPD_STAGE_FW_CFG:		return "fw config";
+	case TPD_STAGE_FW_OVL:		return "fw overlay";
+	case TPD_STAGE_FW_START:	return "fw start";
+	case TPD_STAGE_READY:		return "ready";
+	default:			return "-";
+	}
+}
+
+static const char *tpd_err_name(int err)
+{
+	switch (err) {
+	case TPD_ERR_NO_SPI:	return "no spi ctrl";
+	case TPD_ERR_XFER:	return "spi xfer fail";
+	case TPD_ERR_NO_CHIP:	return "chip silent";
+	case TPD_ERR_FW_PARSE:	return "bad fw image";
+	case TPD_ERR_SENSE_OFF:	return "sense off";
+	case TPD_ERR_FW_CRC:	return "fw crc mismatch";
+	case TPD_ERR_NOT_FOUND:	return "not found";
+	default:		return "ok";
+	}
+}
+
+int tpd_diag_line(int line, char *buf, int len)
+{
+	const struct tpd_diag *d = &g_tpd_diag;
+
+	switch (line) {
+	case 0:
+		if (tpd_ready)
+			return snprintf(buf, len, "TP READY %s", tpd_label);
+		return snprintf(buf, len, "TP FAIL at %s: %s",
+				tpd_stage_name(d->stage), tpd_err_name(d->err));
+	case 1:
+		return snprintf(buf, len,
+			"id %06x link %d off %d parts %d crc %d/%d/%d dma-fb %d hs %d rl %d try %d",
+			d->id, d->link_ok, d->sense_off_ok, d->nparts,
+			d->crc_main_tries, d->crc_cfg_tries, d->crc_ovl_tries,
+			d->dma_fallback, d->handshake_ok, d->reload_dis_ok,
+			d->attempts);
+	default:
+		return snprintf(buf, len,
+			"int %d fr %u idle %u tch %u bad %u zero %u err %u flip %d cnt %02x raw %d,%d",
+			d->int_level, d->frames, d->idle_frames, d->touch_frames,
+			d->bad_frames, d->zero_frames, d->xfer_errors, d->rx_flips,
+			d->last_cnt, d->raw_x, d->raw_y);
+	}
 }

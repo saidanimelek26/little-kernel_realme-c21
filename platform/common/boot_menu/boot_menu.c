@@ -66,6 +66,7 @@
 #include <boot_menu.h>
 #ifdef MTK_TPD_SUPPORT
 #include <dev/tpd.h>
+#include <target/cust_tpd.h>
 #endif
 #include <platform/mt_gpt.h>
 #include <platform/timer.h>
@@ -83,6 +84,15 @@
 #endif
 
 /* Font scales (the LK font is 8x16 pixels). */
+/*
+ * On-screen touch diagnostics (bring-up stage, firmware CRC attempts, frame
+ * counters, last raw point).  Set NOVALK_TOUCH_DIAG=0 in the project makefile
+ * to hide them once touch is verified on the device.
+ */
+#ifndef NOVALK_TOUCH_DIAG
+#define NOVALK_TOUCH_DIAG 1
+#endif
+
 #define TITLE_SCALE	5	/* 40 x 80  */
 #define LABEL_SCALE	3	/* 24 x 48  */
 #define DESC_SCALE	2	/* 16 x 32  */
@@ -275,7 +285,7 @@ static void novalk_paint_footer(int seconds_left)
 	if (g_touch_ok) {
 		char tp[48];
 
-		snprintf(tp, sizeof(tp), "or tap an option  (%s)", tpd_name());
+		snprintf(tp, sizeof(tp), "tap to select, tap again  (%s)", tpd_name());
 		novalk_draw_text_center(g_w / 2, g_footer_y + 40, HINT_SCALE,
 					NOVA_TEXT_DIM, NOVA_BG, tp);
 	} else {
@@ -296,6 +306,40 @@ static void novalk_paint_footer(int seconds_left)
 					"Waiting for your selection");
 	}
 }
+
+#if defined(MTK_TPD_SUPPORT) && NOVALK_TOUCH_DIAG
+#define DIAG_Y_OFFSET	130
+
+static void novalk_paint_diag(void)
+{
+	char line[104];
+	int y = g_footer_y + DIAG_Y_OFFSET;
+
+	video_fill_rect(NOVA_BG, 0, y - 4, g_w, g_h - (y - 4));
+
+	tpd_diag_line(0, line, sizeof(line));
+	novalk_draw_text_center(g_w / 2, y, HINT_SCALE,
+				tpd_available() ? NOVA_ACCENT : NOVA_TEXT, NOVA_BG, line);
+
+	tpd_diag_line(1, line, sizeof(line));
+	video_draw_text(4, y + 40, 1, NOVA_TEXT_DIM, NOVA_BG, line);
+
+	tpd_diag_line(2, line, sizeof(line));
+	video_draw_text(4, y + 60, 1, NOVA_TEXT_DIM, NOVA_BG, line);
+}
+
+/* Cheap change detector so the line is only repainted when it matters. */
+static u32 novalk_diag_signature(void)
+{
+	const struct tpd_diag *d = tpd_get_diag();
+
+	return d->touch_frames * 31u + d->bad_frames * 17u +
+	       d->zero_frames * 13u + d->xfer_errors * 7u +
+	       (u32)d->int_level + ((u32)d->last_cnt << 8);
+}
+#else
+#define novalk_paint_diag()	do { } while (0)
+#endif
 
 static BOOL boot_menu_key_pressed(unsigned short key)
 {
@@ -327,6 +371,10 @@ void boot_menu_select(void)
 	int prev_up, prev_down, prev_pwr;
 #ifdef MTK_TPD_SUPPORT
 	int touch_latched = 0;
+#if NOVALK_TOUCH_DIAG
+	u32 diag_sig = 0;
+	ulong diag_last = 0;
+#endif
 #endif
 	ulong begin = 0;
 	ulong last_timer = 0;
@@ -372,6 +420,7 @@ void boot_menu_select(void)
 	novalk_paint_header();
 	novalk_paint_cards(select);
 	novalk_paint_footer(BOOT_MENU_TIMEOUT_MS / 1000);
+	novalk_paint_diag();
 	video_refresh();
 
 	seconds_left = BOOT_MENU_TIMEOUT_MS / 1000;
@@ -415,21 +464,46 @@ void boot_menu_select(void)
 
 			if (pressed == 1) {
 				if (!touch_latched) {
-					int hit = novalk_hit_test(tx, ty);
+					/* Panel coordinates -> framebuffer pixels. */
+					int sx = tx * g_w / TPD_PANEL_WIDTH;
+					int sy = ty * g_h / TPD_PANEL_HEIGHT;
+					int hit = novalk_hit_test(sx, sy);
 
 					touch_latched = 1;
-					if (hit >= 0) {
-						select = hit;
-						dprintf(INFO,
-							"[BOOTMENU] tap %d,%d -> %d\n",
-							tx, ty, hit);
+					dprintf(INFO, "[BOOTMENU] touch %d,%d -> %d,%d hit %d\n",
+						tx, ty, sx, sy, hit);
+
+					/* Any touch counts as activity. */
+					begin = get_timer(0);
+
+					if (hit >= 0 && hit == select) {
+						/* Second tap on the highlighted card. */
 						break;
+					}
+					if (hit >= 0) {
+						/* First tap: highlight the card. */
+						select = hit;
+						need_cards = 1;
 					}
 				}
 			} else {
 				touch_latched = 0;
 			}
 		}
+
+#if NOVALK_TOUCH_DIAG
+		if (get_timer(diag_last) >= 100) {
+			u32 sig;
+
+			diag_last = get_timer(0);
+			sig = novalk_diag_signature();
+			if (sig != diag_sig) {
+				diag_sig = sig;
+				novalk_paint_diag();
+				video_refresh();
+			}
+		}
+#endif
 #endif
 
 		/* ---------------- timeout ---------------- */
@@ -458,8 +532,10 @@ void boot_menu_select(void)
 		if (need_cards || need_footer) {
 			if (need_cards)
 				novalk_paint_cards(select);
-			if (need_footer)
+			if (need_footer) {
 				novalk_paint_footer(seconds_left);
+				novalk_paint_diag();
+			}
 			video_refresh();
 			need_cards = 0;
 			need_footer = 0;

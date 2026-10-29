@@ -50,4 +50,8 @@ int himax_spi_tpd_probe(u32 *product_id);
 int himax_spi_tpd_read_event(int *x, int *y);
 u32 himax_spi_tpd_product_id(void);
 
+/* Diagnostic block owned by tpd.c, filled by the transports. */
+#include <dev/tpd.h>
+extern struct tpd_diag g_tpd_diag;
+
 #endif /* __TPD_HIMAX_H */
